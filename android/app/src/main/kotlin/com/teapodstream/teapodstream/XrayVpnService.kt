@@ -65,6 +65,58 @@ class XrayVpnService : VpnService() {
             "downloadSpeed" to lastDownloadSpeed,
         )
 
+        private const val PREFS_NAME = "vpn_tile_prefs"
+
+        /** Сохраняет параметры последнего подключения для Quick Settings плитки. */
+        fun saveLastConnectionParams(
+            context: android.content.Context,
+            xrayConfig: String, socksPort: Int, socksUser: String, socksPassword: String,
+            excludedPackages: List<String>, includedPackages: List<String>,
+            vpnMode: String, tunAddress: String, tunNetmask: String, tunMtu: Int, tunDns: String,
+        ) {
+            context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE).edit()
+                .putString("xrayConfig", xrayConfig)
+                .putInt("socksPort", socksPort)
+                .putString("socksUser", socksUser)
+                .putString("socksPassword", socksPassword)
+                .putStringSet("excludedPackages", excludedPackages.toSet())
+                .putStringSet("includedPackages", includedPackages.toSet())
+                .putString("vpnMode", vpnMode)
+                .putString("tunAddress", tunAddress)
+                .putString("tunNetmask", tunNetmask)
+                .putInt("tunMtu", tunMtu)
+                .putString("tunDns", tunDns)
+                .putBoolean("hasConfig", true)
+                .apply()
+        }
+
+        /** Проверяет, есть ли сохранённый конфиг для Quick Settings плитки. */
+        fun hasLastConnectionParams(context: android.content.Context): Boolean {
+            return context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                .getBoolean("hasConfig", false)
+        }
+
+        /** Создаёт Intent для подключения VPN из сохранённых параметров. */
+        fun createConnectIntentFromSaved(context: android.content.Context): Intent? {
+            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            if (!prefs.getBoolean("hasConfig", false)) return null
+
+            return Intent(context, XrayVpnService::class.java).apply {
+                action = ACTION_CONNECT
+                putExtra(EXTRA_XRAY_CONFIG, prefs.getString("xrayConfig", "") ?: "")
+                putExtra(EXTRA_SOCKS_PORT, prefs.getInt("socksPort", 10808))
+                putExtra(EXTRA_SOCKS_USER, prefs.getString("socksUser", "") ?: "")
+                putExtra(EXTRA_SOCKS_PASSWORD, prefs.getString("socksPassword", "") ?: "")
+                putExtra(EXTRA_EXCLUDED_PACKAGES, ArrayList(prefs.getStringSet("excludedPackages", emptySet()) ?: emptySet()))
+                putExtra(EXTRA_INCLUDED_PACKAGES, ArrayList(prefs.getStringSet("includedPackages", emptySet()) ?: emptySet()))
+                putExtra(EXTRA_VPN_MODE, prefs.getString("vpnMode", "allExcept") ?: "allExcept")
+                putExtra(EXTRA_TUN_ADDRESS, prefs.getString("tunAddress", "10.0.0.1") ?: "10.0.0.1")
+                putExtra(EXTRA_TUN_NETMASK, prefs.getString("tunNetmask", "255.255.255.0") ?: "255.255.255.0")
+                putExtra(EXTRA_TUN_MTU, prefs.getInt("tunMtu", 1500))
+                putExtra(EXTRA_TUN_DNS, prefs.getString("tunDns", "1.1.1.1") ?: "1.1.1.1")
+            }
+        }
+
         fun prepareBinaries(context: android.content.Context): Boolean {
             val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
             val filesDir = context.filesDir
@@ -111,6 +163,11 @@ class XrayVpnService : VpnService() {
             val tunNetmask = intent.getStringExtra(EXTRA_TUN_NETMASK) ?: "255.255.255.0"
             val tunMtu = intent.getIntExtra(EXTRA_TUN_MTU, 1500)
             val tunDns = intent.getStringExtra(EXTRA_TUN_DNS) ?: "1.1.1.1"
+
+            // Сохраняем параметры подключения для Quick Settings плитки
+            saveLastConnectionParams(this, xrayConfig, socksPort, socksUser, socksPassword,
+                excludedPackages, includedPackages, vpnMode, tunAddress, tunNetmask, tunMtu, tunDns)
+
             startVpn(xrayConfig, socksPort, socksUser, socksPassword,
                 excludedPackages, includedPackages, vpnMode,
                 tunAddress, tunNetmask, tunMtu, tunDns)
@@ -280,6 +337,13 @@ class XrayVpnService : VpnService() {
         } catch (_: IllegalThreadStateException) {
             true   // still running
         }
+    }
+
+    override fun onRevoke() {
+        // Вызывается Android, когда VPN отключен извне (системные настройки, другой VPN)
+        log("info", "VPN revoked by system")
+        stopVpn()
+        stopSelf()
     }
 
     private fun stopVpn() {

@@ -1,6 +1,7 @@
 package com.teapodstream.teapodstream
 
 import android.content.Intent
+import android.net.VpnService
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -29,23 +30,46 @@ class VpnTileService : TileService() {
             }
             startService(intent)
         } else {
-            // Открываем приложение для подключения (нужен выбор конфига)
-            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-            launchIntent?.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                putExtra("action", "connect")
+            // Подключаем VPN из сохранённого конфига
+            val vpnIntent = VpnService.prepare(this)
+            if (vpnIntent != null) {
+                // Нет разрешения VPN — открываем приложение для его запроса
+                openApp()
+                return
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startActivityAndCollapse(
-                    android.app.PendingIntent.getActivity(
-                        this@VpnTileService, 0, launchIntent!!,
-                        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                    )
-                )
+
+            val connectIntent = XrayVpnService.createConnectIntentFromSaved(this)
+            if (connectIntent != null) {
+                // Есть сохранённый конфиг — подключаемся напрямую
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(connectIntent)
+                } else {
+                    startService(connectIntent)
+                }
             } else {
-                @Suppress("DEPRECATION")
-                startActivityAndCollapse(launchIntent)
+                // Нет сохранённого конфига — открываем приложение для выбора
+                openApp()
             }
+        }
+    }
+
+    /** Открывает приложение (fallback, если нет конфига или разрешения). */
+    private fun openApp() {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+        launchIntent?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra("action", "connect")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startActivityAndCollapse(
+                android.app.PendingIntent.getActivity(
+                    this@VpnTileService, 0, launchIntent!!,
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(launchIntent)
         }
     }
 
