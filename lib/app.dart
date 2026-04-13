@@ -50,6 +50,8 @@ class _AppShellState extends ConsumerState<_AppShell> with WidgetsBindingObserve
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Синхронизируем состояние VPN при холодном старте
+      ref.read(vpnProvider.notifier).syncNativeState();
       if (_autoConnectAttempted) return;
       _autoConnectAttempted = true;
       _tryAutoConnect();

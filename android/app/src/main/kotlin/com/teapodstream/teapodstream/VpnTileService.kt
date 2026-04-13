@@ -9,7 +9,7 @@ import androidx.annotation.RequiresApi
 
 /**
  * Quick Settings плитка для управления VPN из шторки уведомлений.
- * Позволяет включать/выключать VPN одним нажатием.
+ * Поддерживает 3 визуальных состояния: выключен, подключается, включён.
  */
 @RequiresApi(Build.VERSION_CODES.N)
 class VpnTileService : TileService() {
@@ -64,7 +64,10 @@ class VpnTileService : TileService() {
     }
 
     /**
-     * Обновляет состояние плитки в соответствии с текущим состоянием VPN.
+     * Обновляет плитку в шторке.
+     * - Выключен: серый фон, серая иконка (STATE_INACTIVE)
+     * - Подключается: серый фон, белая иконка (STATE_UNAVAILABLE + иконка)
+     * - Включён: цветной фон, белая иконка (STATE_ACTIVE)
      */
     private fun updateTile() {
         val tile = qsTile ?: return
@@ -73,23 +76,28 @@ class VpnTileService : TileService() {
         when (vpnState) {
             "connected" -> {
                 tile.state = Tile.STATE_ACTIVE
-                tile.label = "VPN включён"
+                tile.icon = Icon.createWithResource(this, R.drawable.ic_vpn_tile)
+                tile.label = "TeapodStream"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Нажмите для отключения"
+                    tile.subtitle = "Подключено"
                 }
             }
             "connecting" -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.label = "VPN"
+                // Серый щит, но белая иконка — STATE_UNAVAILABLE рисует
+                // серый фон с полноконтрастной белой иконкой
+                tile.state = Tile.STATE_UNAVAILABLE
+                tile.icon = Icon.createWithResource(this, R.drawable.ic_vpn_tile)
+                tile.label = "TeapodStream"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Подключение..."
+                    tile.subtitle = "Подключение…"
                 }
             }
             else -> {
                 tile.state = Tile.STATE_INACTIVE
-                tile.label = "VPN выключен"
+                tile.icon = Icon.createWithResource(this, R.drawable.ic_vpn_tile)
+                tile.label = "TeapodStream"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Нажмите для включения"
+                    tile.subtitle = null
                 }
             }
         }
