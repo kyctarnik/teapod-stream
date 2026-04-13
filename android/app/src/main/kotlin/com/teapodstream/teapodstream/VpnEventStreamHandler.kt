@@ -1,7 +1,10 @@
 package com.teapodstream.teapodstream
 
+import android.content.ComponentName
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.service.quicksettings.TileService
 import io.flutter.plugin.common.EventChannel
 
 /**
@@ -11,6 +14,8 @@ import io.flutter.plugin.common.EventChannel
 object VpnEventStreamHandler : EventChannel.StreamHandler {
     private var eventSink: EventChannel.EventSink? = null
     private val handler = Handler(Looper.getMainLooper())
+    // Контекст приложения для обновления Quick Settings плитки
+    @Volatile var appContext: android.content.Context? = null
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
@@ -32,6 +37,8 @@ object VpnEventStreamHandler : EventChannel.StreamHandler {
 
     fun sendStateEvent(state: String) {
         sendEvent(mapOf("type" to "state", "value" to state))
+        // Обновляем Quick Settings плитку при изменении состояния VPN
+        requestTileUpdate()
     }
 
     fun sendLogEvent(level: String, message: String) {
@@ -53,5 +60,20 @@ object VpnEventStreamHandler : EventChannel.StreamHandler {
                 "downloadSpeed" to downloadSpeed,
             )
         )
+    }
+
+    /**
+     * Запрашивает обновление Quick Settings плитки.
+     */
+    private fun requestTileUpdate() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val ctx = appContext ?: return
+            try {
+                TileService.requestListeningState(
+                    ctx,
+                    ComponentName(ctx, VpnTileService::class.java)
+                )
+            } catch (_: Exception) { }
+        }
     }
 }
