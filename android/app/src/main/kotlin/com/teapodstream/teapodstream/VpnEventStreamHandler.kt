@@ -65,7 +65,7 @@ object VpnEventStreamHandler : EventChannel.StreamHandler {
     /**
      * Запрашивает обновление Quick Settings плитки.
      */
-    private fun requestTileUpdate() {
+    fun requestTileUpdate() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             val ctx = appContext ?: return
             try {

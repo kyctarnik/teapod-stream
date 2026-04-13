@@ -151,6 +151,15 @@ class XrayEngine implements VpnEngine {
     _statsTimer = null;
   }
 
+  /// Синхронизирует внутреннее состояние движка с нативным.
+  /// Нужно после перезапуска приложения, когда VPN уже подключён.
+  void syncState(VpnState newState) {
+    _state = newState;
+    if (newState == VpnState.connected) {
+      _connectedAt ??= DateTime.now();
+    }
+  }
+
   /// Restarts stream subscriptions after app wake from background.
   /// Called by vpn_provider when syncNativeState detects connected state.
   Future<void> reconnectStreams() async {
@@ -190,6 +199,7 @@ class XrayEngine implements VpnEngine {
 
       await _channel.invokeMethod('connect', {
         'xrayConfig': xrayConfig,
+        'configName': config.name,
         'socksPort': options.socksPort,
         'socksUser': options.socksUser,
         'socksPassword': options.socksPassword,

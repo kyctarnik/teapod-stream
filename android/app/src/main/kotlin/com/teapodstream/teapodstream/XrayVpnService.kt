@@ -1,21 +1,19 @@
 package com.teapodstream.teapodstream
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.TrafficStats
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
-import android.net.TrafficStats
 import androidx.core.app.NotificationCompat
 import java.io.File
 
@@ -28,7 +26,9 @@ class XrayVpnService : VpnService() {
 
         @JvmStatic external fun nativeStartProcessWithFd(cmd: String, args: Array<String>, envKeys: Array<String>, envVals: Array<String>, keepFd: Int, maxFds: Int): Long
         @JvmStatic external fun nativeKillProcess(pid: Long): Int
+        @JvmStatic external fun nativeIsProcessAlive(pid: Long): Int
         @JvmStatic external fun nativeSetMaxFds(maxFds: Int): Int
+
         const val ACTION_CONNECT = "com.teapodstream.CONNECT"
         const val ACTION_DISCONNECT = "com.teapodstream.DISCONNECT"
         const val EXTRA_XRAY_CONFIG = "xray_config"
@@ -43,13 +43,15 @@ class XrayVpnService : VpnService() {
         const val EXTRA_TUN_MTU = "tun_mtu"
         const val EXTRA_TUN_DNS = "tun_dns"
         const val EXTRA_ENABLE_UDP = "enable_udp"
+        const val EXTRA_CONFIG_NAME = "config_name"
 
-        // Static state tracker for querying from Dart
+        // Единственный источник правды о состоянии VPN
         @Volatile private var currentNativeState: String = "disconnected"
         @JvmStatic fun getNativeState(): String = currentNativeState
 
         private const val NOTIFICATION_CHANNEL_ID = "vpn_service"
         private const val NOTIFICATION_ID = 1
+        private const val HEARTBEAT_INTERVAL_MS = 8000L
 
         @Volatile private var totalUpload: Long = 0
         @Volatile private var totalDownload: Long = 0
@@ -65,14 +67,16 @@ class XrayVpnService : VpnService() {
             "downloadSpeed" to lastDownloadSpeed,
         )
 
+        // --- Quick Settings tile: сохранение/загрузка параметров подключения ---
+
         private const val PREFS_NAME = "vpn_tile_prefs"
 
-        /** Сохраняет параметры последнего подключения для Quick Settings плитки. */
         fun saveLastConnectionParams(
             context: android.content.Context,
             xrayConfig: String, socksPort: Int, socksUser: String, socksPassword: String,
             excludedPackages: List<String>, includedPackages: List<String>,
             vpnMode: String, tunAddress: String, tunNetmask: String, tunMtu: Int, tunDns: String,
+            configName: String = "",
         ) {
             context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE).edit()
                 .putString("xrayConfig", xrayConfig)
@@ -86,17 +90,16 @@ class XrayVpnService : VpnService() {
                 .putString("tunNetmask", tunNetmask)
                 .putInt("tunMtu", tunMtu)
                 .putString("tunDns", tunDns)
+                .putString("configName", configName)
                 .putBoolean("hasConfig", true)
                 .apply()
         }
 
-        /** Проверяет, есть ли сохранённый конфиг для Quick Settings плитки. */
         fun hasLastConnectionParams(context: android.content.Context): Boolean {
             return context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
                 .getBoolean("hasConfig", false)
         }
 
-        /** Создаёт Intent для подключения VPN из сохранённых параметров. */
         fun createConnectIntentFromSaved(context: android.content.Context): Intent? {
             val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
             if (!prefs.getBoolean("hasConfig", false)) return null
@@ -114,67 +117,183 @@ class XrayVpnService : VpnService() {
                 putExtra(EXTRA_TUN_NETMASK, prefs.getString("tunNetmask", "255.255.255.0") ?: "255.255.255.0")
                 putExtra(EXTRA_TUN_MTU, prefs.getInt("tunMtu", 1500))
                 putExtra(EXTRA_TUN_DNS, prefs.getString("tunDns", "1.1.1.1") ?: "1.1.1.1")
+                putExtra(EXTRA_CONFIG_NAME, prefs.getString("configName", "") ?: "")
             }
         }
 
         fun prepareBinaries(context: android.content.Context): Boolean {
-            val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
             val filesDir = context.filesDir
             val assets = context.assets
-            val assetsToCopy = listOf("geoip.dat", "geosite.dat")
-            for (name in assetsToCopy) {
-                val file = java.io.File(filesDir, name)
+            for (name in listOf("geoip.dat", "geosite.dat")) {
+                val file = File(filesDir, name)
                 if (file.exists()) continue
                 try {
-                    val input = try { assets.open("binaries/$name") } catch (e: Exception) { assets.open("flutter_assets/assets/binaries/$name") }
+                    val input = try { assets.open("binaries/$name") } catch (_: Exception) { assets.open("flutter_assets/assets/binaries/$name") }
                     input.use { i -> file.outputStream().use { o -> i.copyTo(o) } }
-                } catch (e: Exception) { }
+                } catch (_: Exception) { }
             }
             return true
         }
+
+        /**
+         * Извлекает PID из java.lang.Process через рефлексию.
+         * Android использует UNIXProcess / ProcessImpl с полем "pid".
+         */
+        private fun getProcessPid(process: Process): Long {
+            return try {
+                val field = process.javaClass.getDeclaredField("pid")
+                field.isAccessible = true
+                field.getLong(process)
+            } catch (_: Exception) {
+                -1L
+            }
+        }
     }
 
+    // --- Ресурсы, управляемые cleanupAll() ---
     private var tunInterface: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
     private var xrayPid: Long = -1L
     private var tun2socksPid: Long = -1L
     private var statsThread: Thread? = null
-    private var isRunning = false
+    private var heartbeatThread: Thread? = null
+    @Volatile private var isRunning = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var lastNetworkUpdate: Long = 0
-    private val networkUpdateDebounceMs = 5000L // 5 seconds
+    private val networkUpdateDebounceMs = 5000L
+    private var currentConfigName: String = ""
+
+    // =====================================================================
+    // Управление состоянием — единственная точка обновления
+    // =====================================================================
+
+    /**
+     * Обновляет состояние VPN и уведомляет Flutter.
+     * Все обновления currentNativeState должны проходить ТОЛЬКО через эту функцию.
+     */
+    private fun updateState(newState: String) {
+        val old = currentNativeState
+        if (old == newState) return
+        currentNativeState = newState
+        log("info", "State: $old → $newState")
+        VpnEventStreamHandler.sendStateEvent(newState)
+    }
+
+    // =====================================================================
+    // Lifecycle
+    // =====================================================================
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_DISCONNECT) {
-            stopVpn()
-            stopSelf()
-            return START_NOT_STICKY
+        // Устанавливаем appContext для обновления Quick Settings плитки
+        // (нужно, если VPN запущен из тайла без открытия приложения)
+        if (VpnEventStreamHandler.appContext == null) {
+            VpnEventStreamHandler.appContext = applicationContext
         }
-        if (intent?.action == ACTION_CONNECT) {
-            startForegroundNotification()
-            val xrayConfig = intent.getStringExtra(EXTRA_XRAY_CONFIG) ?: ""
-            val socksPort = intent.getIntExtra(EXTRA_SOCKS_PORT, 10808)
-            val socksUser = intent.getStringExtra(EXTRA_SOCKS_USER) ?: ""
-            val socksPassword = intent.getStringExtra(EXTRA_SOCKS_PASSWORD) ?: ""
-            val excludedPackages = intent.getStringArrayListExtra(EXTRA_EXCLUDED_PACKAGES) ?: arrayListOf()
-            val includedPackages = intent.getStringArrayListExtra(EXTRA_INCLUDED_PACKAGES) ?: arrayListOf()
-            val vpnMode = intent.getStringExtra(EXTRA_VPN_MODE) ?: "allExcept"
-            val tunAddress = intent.getStringExtra(EXTRA_TUN_ADDRESS) ?: "10.0.0.1"
-            val tunNetmask = intent.getStringExtra(EXTRA_TUN_NETMASK) ?: "255.255.255.0"
-            val tunMtu = intent.getIntExtra(EXTRA_TUN_MTU, 1500)
-            val tunDns = intent.getStringExtra(EXTRA_TUN_DNS) ?: "1.1.1.1"
+        when (intent?.action) {
+            ACTION_DISCONNECT -> {
+                cleanupAll()
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_CONNECT -> {
+                val configName = intent.getStringExtra(EXTRA_CONFIG_NAME) ?: ""
+                currentConfigName = configName
+                startForegroundNotification(configName)
+                val xrayConfig = intent.getStringExtra(EXTRA_XRAY_CONFIG) ?: ""
+                val socksPort = intent.getIntExtra(EXTRA_SOCKS_PORT, 10808)
+                val socksUser = intent.getStringExtra(EXTRA_SOCKS_USER) ?: ""
+                val socksPassword = intent.getStringExtra(EXTRA_SOCKS_PASSWORD) ?: ""
+                val excludedPackages = intent.getStringArrayListExtra(EXTRA_EXCLUDED_PACKAGES) ?: arrayListOf()
+                val includedPackages = intent.getStringArrayListExtra(EXTRA_INCLUDED_PACKAGES) ?: arrayListOf()
+                val vpnMode = intent.getStringExtra(EXTRA_VPN_MODE) ?: "allExcept"
+                val tunAddress = intent.getStringExtra(EXTRA_TUN_ADDRESS) ?: "10.0.0.1"
+                val tunNetmask = intent.getStringExtra(EXTRA_TUN_NETMASK) ?: "255.255.255.0"
+                val tunMtu = intent.getIntExtra(EXTRA_TUN_MTU, 1500)
+                val tunDns = intent.getStringExtra(EXTRA_TUN_DNS) ?: "1.1.1.1"
 
-            // Сохраняем параметры подключения для Quick Settings плитки
-            saveLastConnectionParams(this, xrayConfig, socksPort, socksUser, socksPassword,
-                excludedPackages, includedPackages, vpnMode, tunAddress, tunNetmask, tunMtu, tunDns)
+                saveLastConnectionParams(this, xrayConfig, socksPort, socksUser, socksPassword,
+                    excludedPackages, includedPackages, vpnMode, tunAddress, tunNetmask, tunMtu, tunDns,
+                    configName)
 
-            startVpn(xrayConfig, socksPort, socksUser, socksPassword,
-                excludedPackages, includedPackages, vpnMode,
-                tunAddress, tunNetmask, tunMtu, tunDns)
-            return START_STICKY
+                startVpn(xrayConfig, socksPort, socksUser, socksPassword,
+                    excludedPackages, includedPackages, vpnMode,
+                    tunAddress, tunNetmask, tunMtu, tunDns)
+                return START_STICKY
+            }
+            else -> return START_NOT_STICKY
         }
-        return START_NOT_STICKY
     }
+
+    override fun onRevoke() {
+        log("info", "VPN revoked by system")
+        cleanupAll()
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        log("info", "Service onDestroy")
+        cleanupAll()
+        super.onDestroy()
+    }
+
+    // =====================================================================
+    // Единая функция очистки всех ресурсов
+    // =====================================================================
+
+    /**
+     * Останавливает все процессы, закрывает TUN, отменяет потоки и колбэки,
+     * обновляет состояние на "disconnected".
+     * Безопасна для повторного вызова (idempotent).
+     */
+    private fun cleanupAll() {
+        if (!isRunning && currentNativeState == "disconnected") return
+        isRunning = false
+
+        // 1. Остановить heartbeat и stats потоки
+        heartbeatThread?.interrupt()
+        heartbeatThread = null
+        statsThread?.interrupt()
+        statsThread = null
+
+        // 2. Отменить network callback
+        unregisterNetworkCallback()
+
+        // 3. Убить tun2socks (native PID)
+        if (tun2socksPid > 0) {
+            log("info", "Killing tun2socks (pid=$tun2socksPid)")
+            nativeKillProcess(tun2socksPid)
+            tun2socksPid = -1L
+        }
+
+        // 4. Убить xray: сначала Java Process, потом native PID как fallback
+        xrayProcess?.let { proc ->
+            log("info", "Destroying xray process")
+            proc.destroy()
+            xrayProcess = null
+        }
+        if (xrayPid > 0) {
+            log("info", "Killing xray (pid=$xrayPid)")
+            nativeKillProcess(xrayPid)
+            xrayPid = -1L
+        }
+
+        // 5. Закрыть TUN-интерфейс
+        tunInterface?.let { tun ->
+            try { tun.close() } catch (_: Exception) {}
+            tunInterface = null
+        }
+
+        // 6. Сбросить статистику скорости
+        lastUploadSpeed = 0
+        lastDownloadSpeed = 0
+
+        // 7. Обновить состояние
+        updateState("disconnected")
+    }
+
+    // =====================================================================
+    // Запуск VPN
+    // =====================================================================
 
     private fun startVpn(
         xrayConfig: String,
@@ -189,10 +308,12 @@ class XrayVpnService : VpnService() {
         tunMtu: Int,
         tunDns: String,
     ) {
-        if (isRunning) return
+        if (isRunning) {
+            log("warning", "startVpn called while already running, ignoring")
+            return
+        }
         isRunning = true
-        currentNativeState = "connecting"
-            VpnEventStreamHandler.sendStateEvent("connecting")
+        updateState("connecting")
         log("info", "Starting VPN")
 
         try {
@@ -200,6 +321,7 @@ class XrayVpnService : VpnService() {
             configFile.writeText(xrayConfig)
             prepareBinaries(this)
 
+            // --- Построение TUN-интерфейса ---
             val builder = Builder()
                 .setSession("TeapodStream")
                 .setMtu(tunMtu)
@@ -209,67 +331,40 @@ class XrayVpnService : VpnService() {
                 .allowFamily(OsConstants.AF_INET)
                 .setBlocking(false)
 
-            // On Android 8+, set underlying networks for better routing
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-                val activeNetwork = connectivityManager.activeNetwork
-                if (activeNetwork != null) {
-                    builder.setUnderlyingNetworks(arrayOf(activeNetwork))
-                    log("info", "Underlying network set: $activeNetwork")
+                val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+                cm.activeNetwork?.let { network ->
+                    builder.setUnderlyingNetworks(arrayOf(network))
+                    log("info", "Underlying network set: $network")
                 }
             }
 
-            // Apply split tunneling based on VPN mode
-            if (vpnMode == "onlySelected") {
-                // Only selected apps go through VPN (addAllowedApplication)
-                // Requires Android 10+ (API 29)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    for (pkg in includedPackages) {
-                        try {
-                            builder.addAllowedApplication(pkg)
-                            log("info", "Allowed: $pkg")
-                        } catch (e: Exception) {
-                            log("warning", "Failed to allow $pkg: ${e.message}")
-                        }
-                    }
-                    // NOTE: When using addAllowedApplication, all other apps
-                    // (including our own) are automatically excluded.
-                    // We CANNOT call addDisallowedApplication after addAllowedApplication.
-                } else {
-                    log("warning", "onlySelected mode requires Android 10+, falling back to allExcept")
-                    for (pkg in excludedPackages) {
-                        try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
-                    }
-                    try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
-                }
-            } else {
-                // All apps go through VPN, except excluded (default behavior)
-                for (pkg in excludedPackages) {
-                    try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
-                }
-                // Always exclude own app to prevent routing loops
-                try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
-            }
+            // --- Split tunneling ---
+            applySplitTunneling(builder, vpnMode, excludedPackages, includedPackages)
 
-            // Raise fd limit - done in child process via native code
+            // Поднять лимит fd
             val fdResult = nativeSetMaxFds(65536)
             log("info", "nativeSetMaxFds result (parent): $fdResult")
 
-            tunInterface = builder.establish() ?: throw IllegalStateException("Failed to establish TUN")
+            tunInterface = builder.establish()
+                ?: throw IllegalStateException("Failed to establish TUN")
 
-            // dup() creates a new fd WITHOUT FD_CLOEXEC (standard POSIX dup() behavior).
-            // This lets tun2socks inherit the fd across fork+exec and use it bidirectionally.
             val tunDupPfd = ParcelFileDescriptor.dup(tunInterface!!.fileDescriptor)
             val tunFd = tunDupPfd.fd
             log("info", "TUN established, dup fd=$tunFd")
 
-            // 1. Start Xray directly (FD limit set by parent process)
+            // --- 1. Запуск Xray ---
             val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
             val xrayPb = ProcessBuilder(xrayBin.absolutePath, "run", "-c", configFile.absolutePath)
             xrayPb.environment()["XRAY_LOCATION_ASSET"] = filesDir.absolutePath
             xrayPb.redirectErrorStream(true)
             xrayProcess = xrayPb.start()
 
+            // Извлекаем PID для надёжного мониторинга и kill
+            xrayPid = getProcessPid(xrayProcess!!)
+            log("info", "xray process started (pid=$xrayPid)")
+
+            // Поток чтения логов xray
             Thread {
                 try {
                     xrayProcess?.inputStream?.bufferedReader()?.forEachLine { line ->
@@ -283,10 +378,8 @@ class XrayVpnService : VpnService() {
             if (!isProcessAlive(xrayProcess)) {
                 throw IllegalStateException("xray process died on startup")
             }
-            log("info", "xray started")
 
-            // 2. Start tun2socks using native fork+exec so the TUN fd is properly inherited.
-            // Java's ProcessBuilder closes all non-stdio fds in the child; native fork bypasses that.
+            // --- 2. Запуск tun2socks (native fork) ---
             val tun2socksBin = File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
             val proxyUrl = if (socksUser.isNotEmpty()) {
                 "socks5://$socksUser:$socksPassword@127.0.0.1:$socksPort"
@@ -304,80 +397,130 @@ class XrayVpnService : VpnService() {
                 "-tcp-auto-tuning",
             )
             log("info", "Starting tun2socks (native): ${t2sArgs.joinToString(" ")}")
-            tun2socksPid = nativeStartProcessWithFd(tun2socksBin.absolutePath, t2sArgs, emptyArray(), emptyArray(), tunFd, 65536)
+            tun2socksPid = nativeStartProcessWithFd(
+                tun2socksBin.absolutePath, t2sArgs,
+                emptyArray(), emptyArray(), tunFd, 65536
+            )
             if (tun2socksPid < 0) {
                 throw IllegalStateException("nativeStartProcessWithFd failed: errno=${-tun2socksPid}")
             }
 
-            // Close our copy of the dup'd fd - tun2socks child has its own copy now
+            // Закрываем нашу копию fd — tun2socks уже имеет свою
             tunDupPfd.close()
-
             Thread.sleep(300)
             log("info", "tun2socks started (pid=$tun2socksPid)")
 
+            // --- Старт мониторинга ---
             startStatsMonitoring()
+            startHeartbeat()
             registerNetworkCallback()
-            currentNativeState = "connected"
-            VpnEventStreamHandler.sendStateEvent("connected")
+
+            updateState("connected")
             log("info", "VPN connected successfully")
         } catch (e: Exception) {
             log("error", "Start failed: ${e.message}")
-            currentNativeState = "error"
-            VpnEventStreamHandler.sendStateEvent("error")
-            stopVpn()
+            updateState("error")
+            cleanupAll()
         }
     }
 
-    /** Returns true if the process is still running. Uses exitValue() for API < 26 compatibility. */
+    // =====================================================================
+    // Split tunneling
+    // =====================================================================
+
+    private fun applySplitTunneling(
+        builder: Builder,
+        vpnMode: String,
+        excludedPackages: List<String>,
+        includedPackages: List<String>,
+    ) {
+        if (vpnMode == "onlySelected") {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                for (pkg in includedPackages) {
+                    try {
+                        builder.addAllowedApplication(pkg)
+                        log("info", "Allowed: $pkg")
+                    } catch (e: Exception) {
+                        log("warning", "Failed to allow $pkg: ${e.message}")
+                    }
+                }
+            } else {
+                log("warning", "onlySelected mode requires Android 10+, falling back to allExcept")
+                applyExcludedPackages(builder, excludedPackages)
+            }
+        } else {
+            applyExcludedPackages(builder, excludedPackages)
+        }
+    }
+
+    private fun applyExcludedPackages(builder: Builder, excludedPackages: List<String>) {
+        for (pkg in excludedPackages) {
+            try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
+        }
+        try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
+    }
+
+    // =====================================================================
+    // Мониторинг процессов (heartbeat)
+    // =====================================================================
+
+    /** Проверяет живость Java Process через exitValue(). */
     private fun isProcessAlive(p: Process?): Boolean {
         p ?: return false
-        return try {
-            p.exitValue()
-            false  // process has exited
-        } catch (_: IllegalThreadStateException) {
-            true   // still running
-        }
+        return try { p.exitValue(); false } catch (_: IllegalThreadStateException) { true }
     }
 
-    override fun onRevoke() {
-        // Вызывается Android, когда VPN отключен извне (системные настройки, другой VPN)
-        log("info", "VPN revoked by system")
-        stopVpn()
-        stopSelf()
+    /** Проверяет живость native-процесса по PID (kill(pid, 0)). */
+    private fun isNativePidAlive(pid: Long): Boolean {
+        if (pid <= 0) return false
+        return nativeIsProcessAlive(pid) == 1
     }
 
-    private fun stopVpn() {
-        isRunning = false
-        unregisterNetworkCallback()
-        statsThread?.interrupt()
-        if (tun2socksPid > 0) {
-            nativeKillProcess(tun2socksPid)
-            tun2socksPid = -1L
-        }
-        if (xrayPid > 0) {
-            nativeKillProcess(xrayPid)
-            xrayPid = -1L
-        }
-        xrayProcess?.destroy()
-        tunInterface?.close()
-        tunInterface = null
-        currentNativeState = "disconnected"
-        VpnEventStreamHandler.sendStateEvent("disconnected")
+    /**
+     * Heartbeat-поток: каждые HEARTBEAT_INTERVAL_MS проверяет,
+     * живы ли xray и tun2socks. При смерти любого — cleanupAll().
+     */
+    private fun startHeartbeat() {
+        heartbeatThread?.interrupt()
+        heartbeatThread = Thread {
+            while (isRunning) {
+                try {
+                    Thread.sleep(HEARTBEAT_INTERVAL_MS)
+                    if (!isRunning) break
+
+                    val xrayAlive = isProcessAlive(xrayProcess)
+                    val t2sAlive = isNativePidAlive(tun2socksPid)
+
+                    if (!xrayAlive || !t2sAlive) {
+                        log("error", "Heartbeat: процесс умер (xray=$xrayAlive, tun2socks=$t2sAlive)")
+                        cleanupAll()
+                        stopSelf()
+                        break
+                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    log("warning", "Heartbeat error: ${e.message}")
+                }
+            }
+        }.also { it.isDaemon = true; it.name = "vpn-heartbeat"; it.start() }
     }
+
+    // =====================================================================
+    // Статистика трафика
+    // =====================================================================
 
     private fun startStatsMonitoring() {
-        // Capture baseline TrafficStats at connection time
         baseUpload = TrafficStats.getUidTxBytes(applicationInfo.uid).coerceAtLeast(0)
         baseDownload = TrafficStats.getUidRxBytes(applicationInfo.uid).coerceAtLeast(0)
-
-        var lastUp = 0L
-        var lastDown = 0L
-        var lastTime = System.currentTimeMillis()
-
         totalUpload = 0
         totalDownload = 0
         lastUploadSpeed = 0
         lastDownloadSpeed = 0
+
+        var lastUp = 0L
+        var lastDown = 0L
+        var lastTime = System.currentTimeMillis()
 
         statsThread = Thread {
             while (isRunning) {
@@ -386,7 +529,6 @@ class XrayVpnService : VpnService() {
                     val now = System.currentTimeMillis()
                     val elapsed = (now - lastTime) / 1000.0
 
-                    // Get current TrafficStats and subtract baseline
                     val rawTx = TrafficStats.getUidTxBytes(applicationInfo.uid).coerceAtLeast(0)
                     val rawRx = TrafficStats.getUidRxBytes(applicationInfo.uid).coerceAtLeast(0)
                     val currentTx = (rawTx - baseUpload).coerceAtLeast(0)
@@ -405,8 +547,12 @@ class XrayVpnService : VpnService() {
                     VpnEventStreamHandler.sendStatsEvent(totalUpload, totalDownload, lastUploadSpeed, lastDownloadSpeed)
                 } catch (_: InterruptedException) { break } catch (_: Exception) {}
             }
-        }.also { it.isDaemon = true; it.start() }
+        }.also { it.isDaemon = true; it.name = "vpn-stats"; it.start() }
     }
+
+    // =====================================================================
+    // Network callback (underlying networks)
+    // =====================================================================
 
     private fun registerNetworkCallback() {
         try {
@@ -416,15 +562,13 @@ class XrayVpnService : VpnService() {
                     log("info", "Network available, updating underlying networks")
                     updateUnderlyingNetworks(cm)
                 }
-
                 override fun onLost(network: Network) {
                     log("info", "Network lost, updating underlying networks")
                     updateUnderlyingNetworks(cm)
                 }
-
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    // Ignored: fires too frequently on some devices (Huawei)
-                    // and repeated setUnderlyingNetworks() breaks xray TCP connections
+                    // Ignored: слишком часто на некоторых устройствах (Huawei),
+                    // повторные setUnderlyingNetworks() ломают TCP-соединения xray
                 }
             }
             val request = NetworkRequest.Builder()
@@ -438,15 +582,12 @@ class XrayVpnService : VpnService() {
 
     private fun updateUnderlyingNetworks(cm: ConnectivityManager) {
         val now = System.currentTimeMillis()
-        if (now - lastNetworkUpdate < networkUpdateDebounceMs) {
-            return // Debounce: skip updates within 5 seconds
-        }
+        if (now - lastNetworkUpdate < networkUpdateDebounceMs) return
         lastNetworkUpdate = now
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val activeNetwork = cm.activeNetwork
-            if (activeNetwork != null) {
-                setUnderlyingNetworks(arrayOf(activeNetwork))
+            cm.activeNetwork?.let { network ->
+                setUnderlyingNetworks(arrayOf(network))
                 log("info", "Updated underlying network")
             }
         }
@@ -459,12 +600,14 @@ class XrayVpnService : VpnService() {
                 cm.unregisterNetworkCallback(it)
                 networkCallback = null
             }
-        } catch (e: Exception) {
-            // Ignore
-        }
+        } catch (_: Exception) {}
     }
 
-    private fun startForegroundNotification() {
+    // =====================================================================
+    // Foreground notification
+    // =====================================================================
+
+    private fun startForegroundNotification(configName: String = "") {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, "VPN Service", NotificationManager.IMPORTANCE_LOW)
@@ -477,9 +620,10 @@ class XrayVpnService : VpnService() {
         }
         val stopIntent = PendingIntent.getService(this, 0,
             Intent(this, XrayVpnService::class.java).apply { action = ACTION_DISCONNECT }, flags)
+        val contentText = if (configName.isNotEmpty()) configName else "Защищенное соединение активно"
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("TeapodStream VPN")
-            .setContentText("Защищенное соединение активно")
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", stopIntent)
@@ -491,18 +635,20 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun log(level: String, message: String) { 
+    // =====================================================================
+    // Утилиты
+    // =====================================================================
+
+    private fun log(level: String, message: String) {
         android.util.Log.i("TeapodVPN", "[$level] $message")
-        // Send logs to Flutter UI
         if (level == "error" || level == "info" || (BuildConfig.DEBUG && level == "debug")) {
             VpnEventStreamHandler.sendLogEvent(level, message)
         }
     }
 
     private fun subnetMaskToPrefix(mask: String): Int {
-        val parts = mask.split(".").map { it.toInt() }
         var prefix = 0
-        for (part in parts) {
+        for (part in mask.split(".").map { it.toInt() }) {
             var bits = part
             while (bits != 0) { prefix += bits and 1; bits = bits ushr 1 }
         }

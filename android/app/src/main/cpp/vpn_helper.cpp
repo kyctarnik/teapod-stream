@@ -201,6 +201,18 @@ Java_com_teapodstream_teapodstream_XrayVpnService_nativeKillProcess(
 }
 
 /**
+ * Проверяет, жив ли процесс по PID (kill с сигналом 0).
+ * @return 1 — процесс жив, 0 — мёртв или нет прав.
+ */
+JNIEXPORT jint JNICALL
+Java_com_teapodstream_teapodstream_XrayVpnService_nativeIsProcessAlive(
+        JNIEnv *env, jclass clazz, jlong pid) {
+    if (pid <= 0) return 0;
+    int rc = kill((pid_t) pid, 0);
+    return (rc == 0) ? 1 : 0;
+}
+
+/**
  * Increase the process's RLIMIT_NOFILE (max open file descriptors).
  * Called before starting xray/tun2socks so child processes inherit the higher limit.
  *

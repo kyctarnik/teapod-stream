@@ -156,12 +156,14 @@ class VpnNotifier extends Notifier<VpnState2> {
           mappedState = VpnState.disconnected;
       }
 
+      // Синхронизируем внутреннее состояние движка с нативным
+      _engine.syncState(mappedState);
+
       if (state.connectionState != mappedState) {
         state = state.copyWith(connectionState: mappedState);
       }
 
-      // If native says we're connected but stats aren't flowing,
-      // restart the engine's internal polling
+      // Если VPN подключён — перезапускаем опрос статистики
       if (mappedState == VpnState.connected) {
         await _engine.reconnectStreams();
       }
