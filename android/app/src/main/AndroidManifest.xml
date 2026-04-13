@@ -55,6 +55,18 @@
                       android:value="VPN proxy for secure internet access using xray-core" />
         </service>
 
+        <!-- Quick Settings плитка для управления VPN из шторки -->
+        <service
+            android:name=".VpnTileService"
+            android:exported="true"
+            android:label="TeapodStream VPN"
+            android:icon="@drawable/ic_vpn_tile"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

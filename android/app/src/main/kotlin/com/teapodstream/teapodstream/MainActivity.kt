@@ -28,6 +28,9 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        // Инициализируем контекст для обновления Quick Settings плитки
+        VpnEventStreamHandler.appContext = applicationContext
+
         // Event channel for native → Flutter events
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL)
             .setStreamHandler(VpnEventStreamHandler)
