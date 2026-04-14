@@ -26,7 +26,6 @@ class XrayVpnService : VpnService() {
             System.loadLibrary("vpnhelper")
         }
 
-        @JvmStatic external fun nativeStartProcessWithFd(cmd: String, args: Array<String>, envKeys: Array<String>, envVals: Array<String>, keepFd: Int, maxFds: Int): Long
         @JvmStatic external fun nativeKillProcess(pid: Long): Int
         @JvmStatic external fun nativeSetMaxFds(maxFds: Int): Int
         const val ACTION_CONNECT = "com.teapodstream.CONNECT"
@@ -85,7 +84,7 @@ class XrayVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
     private var xrayPid: Long = -1L
-    private var tun2socksPid: Long = -1L
+    private var tunForwarder: UidAwareTunForwarder? = null
     private var statsThread: Thread? = null
     private var isRunning = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -111,9 +110,10 @@ class XrayVpnService : VpnService() {
             val tunNetmask = intent.getStringExtra(EXTRA_TUN_NETMASK) ?: "255.255.255.0"
             val tunMtu = intent.getIntExtra(EXTRA_TUN_MTU, 1500)
             val tunDns = intent.getStringExtra(EXTRA_TUN_DNS) ?: "1.1.1.1"
+            val enableUdp = intent.getBooleanExtra(EXTRA_ENABLE_UDP, true)
             startVpn(xrayConfig, socksPort, socksUser, socksPassword,
                 excludedPackages, includedPackages, vpnMode,
-                tunAddress, tunNetmask, tunMtu, tunDns)
+                tunAddress, tunNetmask, tunMtu, tunDns, enableUdp)
             return START_STICKY
         }
         return START_NOT_STICKY
@@ -131,6 +131,7 @@ class XrayVpnService : VpnService() {
         tunNetmask: String,
         tunMtu: Int,
         tunDns: String,
+        enableUdp: Boolean = true,
     ) {
         if (isRunning) return
         isRunning = true
@@ -199,14 +200,9 @@ class XrayVpnService : VpnService() {
             log("info", "nativeSetMaxFds result (parent): $fdResult")
 
             tunInterface = builder.establish() ?: throw IllegalStateException("Failed to establish TUN")
+            log("info", "TUN established")
 
-            // dup() creates a new fd WITHOUT FD_CLOEXEC (standard POSIX dup() behavior).
-            // This lets tun2socks inherit the fd across fork+exec and use it bidirectionally.
-            val tunDupPfd = ParcelFileDescriptor.dup(tunInterface!!.fileDescriptor)
-            val tunFd = tunDupPfd.fd
-            log("info", "TUN established, dup fd=$tunFd")
-
-            // 1. Start Xray directly (FD limit set by parent process)
+            // 1. Запускаем Xray
             val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
             val xrayPb = ProcessBuilder(xrayBin.absolutePath, "run", "-c", configFile.absolutePath)
             xrayPb.environment()["XRAY_LOCATION_ASSET"] = filesDir.absolutePath
@@ -228,35 +224,20 @@ class XrayVpnService : VpnService() {
             }
             log("info", "xray started")
 
-            // 2. Start tun2socks using native fork+exec so the TUN fd is properly inherited.
-            // Java's ProcessBuilder closes all non-stdio fds in the child; native fork bypasses that.
-            val tun2socksBin = File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
-            val proxyUrl = if (socksUser.isNotEmpty()) {
-                "socks5://$socksUser:$socksPassword@127.0.0.1:$socksPort"
-            } else {
-                "socks5://127.0.0.1:$socksPort"
-            }
-            val t2sArgs = arrayOf(
-                tun2socksBin.absolutePath,
-                "-device", "fd://$tunFd",
-                "-proxy", proxyUrl,
-                "-mtu", tunMtu.toString(),
-                "-loglevel", "error",
-                "-tcp-sndbuf", "524288",
-                "-tcp-rcvbuf", "524288",
-                "-tcp-auto-tuning",
+            // 2. Запускаем UID-aware TUN forwarder (замена tun2socks)
+            tunForwarder = UidAwareTunForwarder(
+                vpnService = this,
+                tunPfd = tunInterface!!,
+                socksHost = "127.0.0.1",
+                socksPort = socksPort,
+                socksUser = socksUser,
+                socksPassword = socksPassword,
+                mtu = tunMtu,
+                enableUdp = enableUdp,
+                onLog = { level, msg -> log(level, msg) },
             )
-            log("info", "Starting tun2socks (native): ${t2sArgs.joinToString(" ")}")
-            tun2socksPid = nativeStartProcessWithFd(tun2socksBin.absolutePath, t2sArgs, emptyArray(), emptyArray(), tunFd, 65536)
-            if (tun2socksPid < 0) {
-                throw IllegalStateException("nativeStartProcessWithFd failed: errno=${-tun2socksPid}")
-            }
-
-            // Close our copy of the dup'd fd - tun2socks child has its own copy now
-            tunDupPfd.close()
-
-            Thread.sleep(300)
-            log("info", "tun2socks started (pid=$tun2socksPid)")
+            tunForwarder!!.start()
+            log("info", "UidAwareTunForwarder started")
 
             startStatsMonitoring()
             registerNetworkCallback()
@@ -282,14 +263,17 @@ class XrayVpnService : VpnService() {
         }
     }
 
+    override fun onDestroy() {
+        stopVpn()
+        super.onDestroy()
+    }
+
     private fun stopVpn() {
         isRunning = false
         unregisterNetworkCallback()
         statsThread?.interrupt()
-        if (tun2socksPid > 0) {
-            nativeKillProcess(tun2socksPid)
-            tun2socksPid = -1L
-        }
+        tunForwarder?.stop()
+        tunForwarder = null
         if (xrayPid > 0) {
             nativeKillProcess(xrayPid)
             xrayPid = -1L
