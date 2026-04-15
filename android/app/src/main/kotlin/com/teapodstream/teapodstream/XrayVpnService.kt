@@ -43,7 +43,6 @@ class XrayVpnService : VpnService() {
         const val EXTRA_SS_PREFIX = "ss_prefix" // hex-encoded Outline prefix bytes
         const val EXTRA_PROXY_ONLY = "proxy_only" // start only SOCKS proxy, no VPN tunnel
         const val EXTRA_SHOW_NOTIFICATION = "show_notification" // show rich notification with speed
-        const val EXTRA_API_PORT = "api_port"
 
         // Static state tracker for querying from Dart
         @Volatile private var currentNativeState: String = "disconnected"
@@ -57,6 +56,8 @@ class XrayVpnService : VpnService() {
         @Volatile private var totalDownload: Long = 0
         @Volatile private var lastUploadSpeed: Long = 0
         @Volatile private var lastDownloadSpeed: Long = 0
+        @Volatile private var baseUpload: Long = 0
+        @Volatile private var baseDownload: Long = 0
 
         fun getStats(): Map<String, Long> = mapOf(
             "upload" to totalUpload,
@@ -88,7 +89,6 @@ class XrayVpnService : VpnService() {
     private var teapodVpnManager: TeapodVpnManager? = null
     private var statsThread: Thread? = null
     private var isRunning = false
-    private var apiPort: Int = 10085
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var lastUnderlyingNetwork: Network? = null
     private var prefixProxy: PrefixTcpProxy? = null
@@ -115,7 +115,6 @@ class XrayVpnService : VpnService() {
                 showNotification = intent.getBooleanExtra(EXTRA_SHOW_NOTIFICATION, true)
                 val xrayConfig = intent.getStringExtra(EXTRA_XRAY_CONFIG) ?: ""
                 val socksPort = intent.getIntExtra(EXTRA_SOCKS_PORT, 10808)
-                apiPort = intent.getIntExtra(EXTRA_API_PORT, 10085)
                 val socksUser = intent.getStringExtra(EXTRA_SOCKS_USER) ?: ""
                 val socksPassword = intent.getStringExtra(EXTRA_SOCKS_PASSWORD) ?: ""
                 val excludedPackages = intent.getStringArrayListExtra(EXTRA_EXCLUDED_PACKAGES) ?: arrayListOf()
@@ -543,6 +542,10 @@ class XrayVpnService : VpnService() {
     }
 
     private fun startStatsMonitoring() {
+        // Capture baseline TrafficStats at connection time
+        baseUpload = TrafficStats.getUidTxBytes(applicationInfo.uid).coerceAtLeast(0)
+        baseDownload = TrafficStats.getUidRxBytes(applicationInfo.uid).coerceAtLeast(0)
+
         var lastUp = 0L
         var lastDown = 0L
         var lastTime = System.currentTimeMillis()
@@ -552,25 +555,25 @@ class XrayVpnService : VpnService() {
         lastUploadSpeed = 0
         lastDownloadSpeed = 0
 
-        val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
-
         statsThread = Thread {
             while (isRunning) {
                 try {
-                    Thread.sleep(1500)
+                    Thread.sleep(1000)
                     val now = System.currentTimeMillis()
                     val elapsed = (now - lastTime) / 1000.0
 
-                    // Query Xray API for uplink/downlink stats
-                    val up = queryXrayStat(xrayBin, "inbound>>>socks-in>>>traffic>>>uplink")
-                    val down = queryXrayStat(xrayBin, "inbound>>>socks-in>>>traffic>>>downlink")
+                    // Get current TrafficStats and subtract baseline
+                    val rawTx = TrafficStats.getUidTxBytes(applicationInfo.uid).coerceAtLeast(0)
+                    val rawRx = TrafficStats.getUidRxBytes(applicationInfo.uid).coerceAtLeast(0)
+                    val currentTx = (rawTx - baseUpload).coerceAtLeast(0)
+                    val currentRx = (rawRx - baseDownload).coerceAtLeast(0)
 
-                    if (up >= 0) totalUpload = up
-                    if (down >= 0) totalDownload = down
+                    totalUpload = currentTx
+                    totalDownload = currentRx
 
                     if (elapsed > 0) {
-                        lastUploadSpeed = ((totalUpload - lastUp) / elapsed).toLong().coerceAtLeast(0)
-                        lastDownloadSpeed = ((totalDownload - lastDown) / elapsed).toLong().coerceAtLeast(0)
+                        lastUploadSpeed = ((currentTx - lastUp) / elapsed).toLong().coerceAtLeast(0)
+                        lastDownloadSpeed = ((currentRx - lastDown) / elapsed).toLong().coerceAtLeast(0)
                     }
                     lastUp = totalUpload
                     lastDown = totalDownload
@@ -580,27 +583,6 @@ class XrayVpnService : VpnService() {
                 } catch (_: InterruptedException) { break } catch (_: Exception) {}
             }
         }.also { it.isDaemon = true; it.start() }
-    }
-
-    private fun queryXrayStat(xrayBin: File, statName: String): Long {
-        return try {
-            val pb = ProcessBuilder(
-                xrayBin.absolutePath, "api", "stats",
-                "--server=127.0.0.1:$apiPort",
-                "-name=$statName",
-                "-reset=false"
-            )
-            val p = pb.start()
-            val output = p.inputStream.bufferedReader().readText()
-            p.waitFor()
-            
-            // Expected output: "stat: <name>: <value>" or "value: <value>"
-            val regex = Regex("""value:\s*(\d+)""")
-            val match = regex.find(output)
-            match?.groupValues?.get(1)?.toLong() ?: -1L
-        } catch (e: Exception) {
-            -1L
-        }
     }
 
     private fun registerNetworkCallback() {

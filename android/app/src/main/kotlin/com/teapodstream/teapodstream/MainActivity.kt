@@ -180,14 +180,10 @@ class MainActivity : FlutterActivity() {
         proxyOnly: Boolean = false,
         showNotification: Boolean = true,
     ) {
-        // Generate random API port (1024-65535) and a random tag/secret
-        val apiPort = (1024..65535).random()
-
         val intent = Intent(this, XrayVpnService::class.java).apply {
             action = XrayVpnService.ACTION_CONNECT
             putExtra(XrayVpnService.EXTRA_XRAY_CONFIG, xrayConfig)
             putExtra(XrayVpnService.EXTRA_SOCKS_PORT, socksPort)
-            putExtra(XrayVpnService.EXTRA_API_PORT, apiPort)
             putExtra(XrayVpnService.EXTRA_SOCKS_USER, socksUser)
             putExtra(XrayVpnService.EXTRA_SOCKS_PASSWORD, socksPassword)
             putExtra(XrayVpnService.EXTRA_EXCLUDED_PACKAGES, ArrayList(excludedPackages))

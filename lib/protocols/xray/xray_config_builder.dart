@@ -9,11 +9,6 @@ class XrayConfigBuilder {
 
     return {
       'log': {'loglevel': options.logLevel.name},
-      'api': {
-        'tag': 'api',
-        'services': ['StatsService']
-      },
-      'stats': {},
       'dns': dnsBlock,
       'inbounds': [
         {
@@ -34,12 +29,6 @@ class XrayConfigBuilder {
             'destOverride': ['http', 'tls', 'quic'],
             'routeOnly': false,
           },
-        },
-        {
-          'listen': '127.0.0.1',
-          'port': options.apiPort,
-          'protocol': 'api',
-          'tag': 'api-inbound'
         }
       ],
       'outbounds': [
@@ -51,11 +40,6 @@ class XrayConfigBuilder {
       'routing': {
         'domainStrategy': 'IPIfNonMatch',
         'rules': [
-          {
-            'type': 'field',
-            'inboundTag': ['api-inbound'],
-            'outboundTag': 'api',
-          },
           if (options.dnsMode == DnsMode.proxy) ...[
             // Proxy mode: intercept DNS via xray's DNS module → queries go through VPN
             {
@@ -93,8 +77,8 @@ class XrayConfigBuilder {
           }
         },
         'system': {
-          'statsInboundUplink': true,
-          'statsInboundDownlink': true,
+          'statsInboundUplink': false,
+          'statsInboundDownlink': false,
         }
       },
     };
