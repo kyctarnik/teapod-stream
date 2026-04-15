@@ -18,11 +18,6 @@ class _ConnectButtonState extends State<ConnectButton>
   late final AnimationController _controller;
   late final Animation<double> _pulseAnim;
 
-  /// Optimistic local state set on tap — cleared once the real state catches up.
-  /// Using local setState guarantees an immediate repaint in the same frame,
-  /// independent of Riverpod's vsync-deferred rebuild cycle.
-  VpnState? _optimisticState;
-
   @override
   void initState() {
     super.initState();
@@ -33,33 +28,19 @@ class _ConnectButtonState extends State<ConnectButton>
     _pulseAnim = Tween<double>(begin: 1.0, end: 1.15).animate(
       CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
     );
+    _syncAnimation();
   }
 
   @override
   void didUpdateWidget(ConnectButton old) {
     super.didUpdateWidget(old);
-    // Clear optimistic state once the real state has caught up to it
-    if (_optimisticState != null && widget.state == _optimisticState) {
-      _optimisticState = null;
+    if (old.state != widget.state) {
+      _syncAnimation();
     }
-    // Clear disconnecting optimistic when real state reached disconnected
-    if (_optimisticState == VpnState.disconnecting &&
-        widget.state == VpnState.disconnected) {
-      _optimisticState = null;
-    }
-    // Clear connecting optimistic ONLY when the connection attempt has resolved —
-    // not when widget.state == disconnected, because that is also the STARTING
-    // state before the native "connecting" event arrives. Clearing it there causes
-    // the yellow button to disappear the moment HomeScreen rebuilds for any reason
-    // (e.g. permission dialog pause/resume) before the native state has changed.
-    if (_optimisticState == VpnState.connecting &&
-        (widget.state == VpnState.connected ||
-            widget.state == VpnState.error)) {
-      _optimisticState = null;
-    }
+  }
 
-    final effective = _effectiveState;
-    if (effective == VpnState.connecting) {
+  void _syncAnimation() {
+    if (widget.state == VpnState.connecting) {
       _controller.repeat(reverse: true);
     } else {
       _controller.stop();
@@ -73,24 +54,14 @@ class _ConnectButtonState extends State<ConnectButton>
     super.dispose();
   }
 
-  VpnState get _effectiveState => _optimisticState ?? widget.state;
-
-  void _handleTap() {
-    final next = widget.state == VpnState.connected
-        ? VpnState.disconnecting
-        : VpnState.connecting;
-    setState(() => _optimisticState = next);
-    widget.onTap?.call();
-  }
-
-  Color get _outerColor => switch (_effectiveState) {
+  Color get _outerColor => switch (widget.state) {
         VpnState.connected => AppColors.connectedDim.withValues(alpha: 0.3),
         VpnState.connecting => AppColors.connecting.withValues(alpha: 0.2),
         VpnState.error => AppColors.error.withValues(alpha: 0.2),
         _ => AppColors.primaryDim.withValues(alpha: 0.2),
       };
 
-  Color get _innerColor => switch (_effectiveState) {
+  Color get _innerColor => switch (widget.state) {
         VpnState.connected => AppColors.connected,
         VpnState.connecting => AppColors.connecting,
         VpnState.disconnecting => AppColors.connecting,
@@ -98,7 +69,7 @@ class _ConnectButtonState extends State<ConnectButton>
         _ => AppColors.primary,
       };
 
-  String get _label => switch (_effectiveState) {
+  String get _label => switch (widget.state) {
         VpnState.connected => 'ОТКЛЮЧИТЬ',
         VpnState.connecting => 'ПОДКЛЮЧЕНИЕ...',
         VpnState.disconnecting => 'ОТКЛЮЧЕНИЕ...',
@@ -117,7 +88,7 @@ class _ConnectButtonState extends State<ConnectButton>
       animation: _pulseAnim,
       builder: (context, child) {
         return GestureDetector(
-          onTap: _enabled ? _handleTap : null,
+          onTap: _enabled ? widget.onTap : null,
           child: Stack(
             alignment: Alignment.center,
             children: [

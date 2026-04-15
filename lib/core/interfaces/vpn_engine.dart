@@ -1,5 +1,4 @@
 import '../models/vpn_config.dart';
-import '../models/vpn_stats.dart';
 import '../models/vpn_log_entry.dart';
 import '../models/dns_config.dart';
 import '../services/settings_service.dart';
@@ -9,20 +8,8 @@ enum VpnState { disconnected, connecting, connected, disconnecting, error }
 abstract class VpnEngine {
   String get protocolName;
 
-  Stream<VpnState> get stateStream;
-  Stream<VpnStats> get statsStream;
-  Stream<VpnLogEntry> get logStream;
-
-  VpnState get currentState;
-  VpnStats get currentStats;
-
   Future<void> connect(VpnConfig config, VpnEngineOptions options);
   Future<void> disconnect();
-
-  /// Synchronise engine-internal state from the authoritative native value.
-  /// Must update both the internal state field and emit on stateStream so that
-  /// callers like disconnect() don't short-circuit due to a stale guard.
-  void syncState(VpnState nativeState);
 
   Future<int?> pingConfig(VpnConfig config);
   bool supportsConfig(VpnConfig config);
