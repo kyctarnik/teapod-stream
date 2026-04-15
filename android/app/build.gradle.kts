@@ -33,34 +33,12 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
-        // Restrict ABI to the target platform (default: arm64-v8a)
-        val targetPlatform = project.findProperty("target-platform") as String?
-        val targetAbi = when (targetPlatform) {
-            "android-arm64" -> "arm64-v8a"
-            "android-arm"   -> "armeabi-v7a"
-            "android-x64"   -> "x86_64"
-            else -> "arm64-v8a"
-        }
-        ndk {
-            abiFilters.clear()
-            abiFilters.add(targetAbi)
-        }
     }
 
     packaging {
         jniLibs {
-            val targetPlatform = project.findProperty("target-platform") as String?
-            val targetAbi = when (targetPlatform) {
-                "android-arm64" -> "arm64-v8a"
-                "android-arm"   -> "armeabi-v7a"
-                "android-x64"   -> "x86_64"
-                else -> "arm64-v8a"
-            }
-            listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64").forEach { abi ->
-                if (abi != targetAbi) {
-                    excludes.add("lib/$abi/**")
-                }
-            }
+            // x86 is not supported by teapod-core
+            excludes.add("lib/x86/**")
         }
     }
 
@@ -82,22 +60,7 @@ android {
 }
 
 dependencies {
-    // Динамический выбор AAR в зависимости от целевой архитектуры
-    val targetPlatform = project.findProperty("target-platform") as String?
-    val abi = when (targetPlatform) {
-        "android-arm64" -> "arm64-v8a"
-        "android-arm"   -> "armeabi-v7a"
-        "android-x64"   -> "x86_64"
-        else -> null
-    }
-
-    if (abi != null) {
-        implementation(files("libs/teapod-core-$abi.aar"))
-    } else {
-        // No target platform specified — default to arm64-v8a to avoid duplicate-class
-        // errors that occur when both AARs are on the classpath simultaneously.
-        implementation(files("libs/teapod-core-arm64-v8a.aar"))
-    }
+    implementation(files("libs/teapod-core.aar"))
 }
 
 flutter {

@@ -72,18 +72,11 @@ ensure_pub() {
 
 check_binaries() {
   local missing=0
-  local check_all=${1:-false}
-  local abis_to_check=("$DEFAULT_ABI")
-  if [[ "$check_all" == "true" ]]; then
-    abis_to_check=("${ALL_ABIS[@]}")
-  fi
 
-  for abi in "${abis_to_check[@]}"; do
-    if [[ ! -f "$LIBS_DIR/teapod-core-$abi.aar" ]]; then
-      warn "Отсутствует: $LIBS_DIR/teapod-core-$abi.aar"
-      missing=1
-    fi
-  done
+  if [[ ! -f "$LIBS_DIR/teapod-core.aar" ]]; then
+    warn "Отсутствует: $LIBS_DIR/teapod-core.aar"
+    missing=1
+  fi
 
   local ASSETS_BIN="assets/binaries"
   for f in "geoip.dat" "geosite.dat"; do
@@ -122,21 +115,41 @@ strip_binary() {
 
 copy_teapod_core_binaries() {
   mkdir -p "$LIBS_DIR"
-  log "Копируем teapod-core из $LOCAL_TEAPOD_CORE_DIR..."
 
-  for abi in "${ALL_ABIS[@]}"; do
-    # Find the latest AAR for this ABI in the outputs dir
-    local local_file
-    local_file=$(ls "$LOCAL_TEAPOD_CORE_DIR"/teapod-core-"$abi"-*.aar 2>/dev/null | sort -V | tail -1)
-
-    if [[ -n "$local_file" ]]; then
-      cp "$local_file" "$LIBS_DIR/teapod-core-$abi.aar"
-      ok "teapod-core AAR ($abi) скопирован из $(basename "$local_file")"
-    else
-      warn "Не найден teapod-core AAR для $abi в $LOCAL_TEAPOD_CORE_DIR"
-      warn "Соберите библиотеку: cd ../teapod-core && bash build.sh"
+  # 1. Ищем fat AAR локально (../teapod-core/outputs/teapod-core-{VERSION}.aar)
+  #    Имя fat AAR не содержит ABI: teapod-core-1.0.0.aar, не teapod-core-arm64-v8a-1.0.0.aar
+  if [[ -d "$LOCAL_TEAPOD_CORE_DIR" ]]; then
+    local local_fat
+    local_fat=$(ls "$LOCAL_TEAPOD_CORE_DIR"/teapod-core-[0-9]*.aar 2>/dev/null | sort -V | tail -1)
+    if [[ -n "$local_fat" ]]; then
+      cp "$local_fat" "$LIBS_DIR/teapod-core.aar"
+      ok "Локальный fat AAR скопирован: $(basename "$local_fat")"
+      return 0
     fi
-  done
+  fi
+
+  # 2. Fallback — скачиваем fat AAR из последнего релиза Wendor/teapod-core
+  log "Локальный teapod-core не найден, скачиваем с GitHub..."
+  local release_info
+  release_info=$(curl -sf "https://api.github.com/repos/Wendor/teapod-core/releases/latest") || {
+    err "Не удалось получить инфо о релизе Wendor/teapod-core"
+  }
+
+  local tag download_url
+  tag=$(echo "$release_info" | grep '"tag_name":' | cut -d'"' -f4)
+  # Fat AAR: имя вида teapod-core-{VERSION}.aar (без ABI-суффикса)
+  download_url=$(echo "$release_info" | grep "browser_download_url" \
+    | grep '"teapod-core-[^"]*\.aar"' \
+    | grep -v 'arm64\|armeabi\|x86' \
+    | cut -d'"' -f4 | head -1)
+
+  if [[ -z "$download_url" ]]; then
+    err "Не найден fat AAR в релизе $tag репозитория Wendor/teapod-core"
+  fi
+
+  log "Скачиваем teapod-core $tag..."
+  curl -L --progress-bar "$download_url" -o "$LIBS_DIR/teapod-core.aar"
+  ok "Скачан teapod-core $tag"
 }
 
 download_binaries() {
@@ -228,32 +241,14 @@ case "${1:-help}" in
   release)
     log "Сборка RELEASE APK (arm64 + arm32 + x86_64)..."
     accept_sdk_licenses
-    check_binaries true || true
+    check_binaries || true
     ensure_pub
 
-    # Каждый AAR содержит те же Kotlin-классы → Duplicate class в Gradle,
-    # поэтому собираем по одной архитектуре за раз с --no-pub.
     dir="build/app/outputs/flutter-apk"
     rm -f "$dir"/app-*-release.apk
 
-    for plat in android-arm64 android-arm android-x64; do
-      case "$plat" in
-        android-arm64) abi="arm64-v8a" ;;
-        android-arm)   abi="armeabi-v7a" ;;
-        android-x64)   abi="x86_64" ;;
-      esac
-
-      log "Сборка архитектуры: $abi ($plat)..."
-      flutter build apk --release --target-platform "$plat" --no-pub \
-        --obfuscate --split-debug-info=build/app/outputs/symbols
-
-      if [[ -f "$dir/app-release.apk" ]]; then
-        mv "$dir/app-release.apk" "$dir/app-$abi-release.apk"
-        ok "Сборка $abi завершена"
-      else
-        err "Ошибка: файл $dir/app-release.apk не был создан для $abi"
-      fi
-    done
+    flutter build apk --release --split-per-abi --no-pub \
+      --obfuscate --split-debug-info=build/app/outputs/symbols
 
     rename_apks
     ;;
