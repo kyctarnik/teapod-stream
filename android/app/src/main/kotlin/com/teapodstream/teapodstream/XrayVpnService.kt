@@ -32,6 +32,7 @@ class XrayVpnService : VpnService() {
         @JvmStatic external fun nativeSetMaxFds(maxFds: Int): Int
         const val ACTION_CONNECT = "com.teapodstream.CONNECT"
         const val ACTION_DISCONNECT = "com.teapodstream.DISCONNECT"
+        const val ACTION_CONNECT_QUICK = "com.teapodstream.CONNECT_QUICK" // reconnect from notification
         const val EXTRA_XRAY_CONFIG = "xray_config"
         const val EXTRA_SOCKS_PORT = "socks_port"
         const val EXTRA_SOCKS_USER = "socks_user"
@@ -39,19 +40,16 @@ class XrayVpnService : VpnService() {
         const val EXTRA_EXCLUDED_PACKAGES = "excluded_packages"
         const val EXTRA_INCLUDED_PACKAGES = "included_packages"
         const val EXTRA_VPN_MODE = "vpn_mode"
-        const val EXTRA_TUN_ADDRESS = "tun_address"
-        const val EXTRA_TUN_NETMASK = "tun_netmask"
-        const val EXTRA_TUN_MTU = "tun_mtu"
-        const val EXTRA_TUN_DNS = "tun_dns"
-        const val EXTRA_ENABLE_UDP = "enable_udp"
         const val EXTRA_SS_PREFIX = "ss_prefix" // hex-encoded Outline prefix bytes
         const val EXTRA_PROXY_ONLY = "proxy_only" // start only SOCKS proxy, no VPN tunnel
+        const val EXTRA_SHOW_NOTIFICATION = "show_notification" // show rich notification with speed
 
         // Static state tracker for querying from Dart
         @Volatile private var currentNativeState: String = "disconnected"
         @JvmStatic fun getNativeState(): String = currentNativeState
 
         private const val NOTIFICATION_CHANNEL_ID = "vpn_service"
+        private const val NOTIFICATION_CHANNEL_MINIMAL_ID = "vpn_service_minimal"
         private const val NOTIFICATION_ID = 1
 
         @Volatile private var totalUpload: Long = 0
@@ -92,37 +90,140 @@ class XrayVpnService : VpnService() {
     private var statsThread: Thread? = null
     private var isRunning = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    private var lastNetworkUpdate: Long = 0
-    private val networkUpdateDebounceMs = 5000L // 5 seconds
+    private var lastUnderlyingNetwork: Network? = null
     private var prefixProxy: PrefixTcpProxy? = null
+    private var showNotification = true
+
+    // TUN parameters — always the same fixed values; defined once here to avoid
+    // scattering magic strings across the file. The Dart side uses the same constants
+    // (AppConstants.tunAddress / tunNetmask / tunMtu / tunDns).
+    private val tunAddress = "10.120.230.1"
+    private val tunNetmask = "255.255.255.0"
+    private val tunMtu    = 9000
+    private val tunDns    = "1.1.1.1"
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_DISCONNECT) {
-            stopVpn()
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_DISCONNECT -> {
+                stopVpn()
+                // Keep the service alive as foreground with a "Connect" notification.
+                // This lets users reconnect from the shade without opening the app.
+                showDisconnectedNotification()
+                return START_STICKY
+            }
+            ACTION_CONNECT -> {
+                showNotification = intent.getBooleanExtra(EXTRA_SHOW_NOTIFICATION, true)
+                val xrayConfig = intent.getStringExtra(EXTRA_XRAY_CONFIG) ?: ""
+                val socksPort = intent.getIntExtra(EXTRA_SOCKS_PORT, 10808)
+                val socksUser = intent.getStringExtra(EXTRA_SOCKS_USER) ?: ""
+                val socksPassword = intent.getStringExtra(EXTRA_SOCKS_PASSWORD) ?: ""
+                val excludedPackages = intent.getStringArrayListExtra(EXTRA_EXCLUDED_PACKAGES) ?: arrayListOf()
+                val includedPackages = intent.getStringArrayListExtra(EXTRA_INCLUDED_PACKAGES) ?: arrayListOf()
+                val vpnMode = intent.getStringExtra(EXTRA_VPN_MODE) ?: "allExcept"
+                val ssPrefix = intent.getStringExtra(EXTRA_SS_PREFIX)
+                val proxyOnly = intent.getBooleanExtra(EXTRA_PROXY_ONLY, false)
+                // Persist dynamic params so ACTION_CONNECT_QUICK can reconnect without the app
+                saveConnectionParams(socksPort, socksUser, socksPassword,
+                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, showNotification)
+                ensureForeground()
+                startVpn(xrayConfig, socksPort, socksUser, socksPassword,
+                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly)
+                return START_STICKY
+            }
+            ACTION_CONNECT_QUICK -> {
+                val params = loadConnectionParams()
+                val configFile = File(filesDir, "xray_config.json")
+                if (params != null && configFile.exists()) {
+                    showNotification = params.showNotification
+                    // Check VPN permission only for tunnel mode (proxy-only doesn't need it)
+                    val needsPermission = !params.proxyOnly && VpnService.prepare(this) != null
+                    if (needsPermission) {
+                        openApp()
+                    } else {
+                        startVpn(
+                            configFile.readText(),
+                            params.socksPort, params.socksUser, params.socksPassword,
+                            params.excludedPackages, params.includedPackages, params.vpnMode,
+                            params.ssPrefix, params.proxyOnly
+                        )
+                    }
+                } else {
+                    // No saved params yet — open app so the user can connect normally
+                    openApp()
+                }
+                return START_STICKY
+            }
         }
-        if (intent?.action == ACTION_CONNECT) {
-            startForegroundNotification()
-            val xrayConfig = intent.getStringExtra(EXTRA_XRAY_CONFIG) ?: ""
-            val socksPort = intent.getIntExtra(EXTRA_SOCKS_PORT, 10808)
-            val socksUser = intent.getStringExtra(EXTRA_SOCKS_USER) ?: ""
-            val socksPassword = intent.getStringExtra(EXTRA_SOCKS_PASSWORD) ?: ""
-            val excludedPackages = intent.getStringArrayListExtra(EXTRA_EXCLUDED_PACKAGES) ?: arrayListOf()
-            val includedPackages = intent.getStringArrayListExtra(EXTRA_INCLUDED_PACKAGES) ?: arrayListOf()
-            val vpnMode = intent.getStringExtra(EXTRA_VPN_MODE) ?: "allExcept"
-            val tunAddress = intent.getStringExtra(EXTRA_TUN_ADDRESS) ?: "10.0.0.1"
-            val tunNetmask = intent.getStringExtra(EXTRA_TUN_NETMASK) ?: "255.255.255.0"
-            val tunMtu = intent.getIntExtra(EXTRA_TUN_MTU, 1500)
-            val tunDns = intent.getStringExtra(EXTRA_TUN_DNS) ?: "1.1.1.1"
-            val ssPrefix = intent.getStringExtra(EXTRA_SS_PREFIX)
-            val proxyOnly = intent.getBooleanExtra(EXTRA_PROXY_ONLY, false)
-            startVpn(xrayConfig, socksPort, socksUser, socksPassword,
-                excludedPackages, includedPackages, vpnMode,
-                tunAddress, tunNetmask, tunMtu, tunDns, ssPrefix, proxyOnly)
-            return START_STICKY
+        // Service restarted by Android after being killed — show disconnected notification
+        showDisconnectedNotification()
+        return START_STICKY
+    }
+
+    // ---- Connection-params persistence ----
+
+    private data class ConnectionParams(
+        val socksPort: Int,
+        val socksUser: String,
+        val socksPassword: String,
+        val excludedPackages: List<String>,
+        val includedPackages: List<String>,
+        val vpnMode: String,
+        val ssPrefix: String?,
+        val proxyOnly: Boolean,
+        val showNotification: Boolean,
+    )
+
+    private fun saveConnectionParams(
+        socksPort: Int, socksUser: String, socksPassword: String,
+        excludedPackages: List<String>, includedPackages: List<String>,
+        vpnMode: String, ssPrefix: String?, proxyOnly: Boolean, showNotification: Boolean,
+    ) {
+        try {
+            val json = org.json.JSONObject().apply {
+                put("socksPort", socksPort)
+                put("socksUser", socksUser)
+                put("socksPassword", socksPassword)
+                put("excludedPackages", org.json.JSONArray(excludedPackages))
+                put("includedPackages", org.json.JSONArray(includedPackages))
+                put("vpnMode", vpnMode)
+                if (ssPrefix != null) put("ssPrefix", ssPrefix)
+                put("proxyOnly", proxyOnly)
+                put("showNotification", showNotification)
+            }
+            File(filesDir, "last_connection.json").writeText(json.toString())
+        } catch (e: Exception) {
+            log("warning", "Failed to save connection params: ${e.message}")
         }
-        return START_NOT_STICKY
+    }
+
+    private fun loadConnectionParams(): ConnectionParams? {
+        return try {
+            val text = File(filesDir, "last_connection.json").readText()
+            val json = org.json.JSONObject(text)
+            val excluded = json.getJSONArray("excludedPackages")
+                .let { arr -> List(arr.length()) { arr.getString(it) } }
+            val included = json.getJSONArray("includedPackages")
+                .let { arr -> List(arr.length()) { arr.getString(it) } }
+            ConnectionParams(
+                socksPort = json.getInt("socksPort"),
+                socksUser = json.getString("socksUser"),
+                socksPassword = json.getString("socksPassword"),
+                excludedPackages = excluded,
+                includedPackages = included,
+                vpnMode = json.optString("vpnMode", "allExcept"),
+                ssPrefix = json.optString("ssPrefix").takeIf { it.isNotEmpty() },
+                proxyOnly = json.optBoolean("proxyOnly", false),
+                showNotification = json.optBoolean("showNotification", true),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun openApp() {
+        packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ?.let { startActivity(it) }
     }
 
     private fun startVpn(
@@ -133,10 +234,6 @@ class XrayVpnService : VpnService() {
         excludedPackages: List<String>,
         includedPackages: List<String>,
         vpnMode: String,
-        tunAddress: String,
-        tunNetmask: String,
-        tunMtu: Int,
-        tunDns: String,
         ssPrefix: String? = null,
         proxyOnly: Boolean = false,
     ) {
@@ -390,6 +487,7 @@ class XrayVpnService : VpnService() {
 
     private fun stopVpn() {
         isRunning = false
+        lastUnderlyingNetwork = null
         unregisterNetworkCallback()
         statsThread?.interrupt()
 
@@ -453,6 +551,7 @@ class XrayVpnService : VpnService() {
                     lastDown = totalDownload
                     lastTime = now
                     VpnEventStreamHandler.sendStatsEvent(totalUpload, totalDownload, lastUploadSpeed, lastDownloadSpeed)
+                    updateNotification(lastUploadSpeed, lastDownloadSpeed)
                 } catch (_: InterruptedException) { break } catch (_: Exception) {}
             }
         }.also { it.isDaemon = true; it.start() }
@@ -463,18 +562,31 @@ class XrayVpnService : VpnService() {
             val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    log("info", "Network available, updating underlying networks")
+                    log("info", "Network available: $network")
                     updateUnderlyingNetworks(cm)
                 }
 
                 override fun onLost(network: Network) {
-                    log("info", "Network lost, updating underlying networks")
+                    log("info", "Network lost: $network")
+                    // Clear cached network so the next available one is applied immediately
+                    if (lastUnderlyingNetwork == network) {
+                        lastUnderlyingNetwork = null
+                    }
                     updateUnderlyingNetworks(cm)
                 }
 
-                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    // Ignored: fires too frequently on some devices (Huawei)
-                    // and repeated setUnderlyingNetworks() breaks xray TCP connections
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities
+                ) {
+                    // Only act when this IS the active network and transport type changed
+                    // (e.g. WiFi → LTE handover). Using the active network guard avoids
+                    // the Huawei flood of capability events from non-active networks.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        if (cm.activeNetwork == network) {
+                            updateUnderlyingNetworks(cm)
+                        }
+                    }
                 }
             }
             val request = NetworkRequest.Builder()
@@ -487,18 +599,15 @@ class XrayVpnService : VpnService() {
     }
 
     private fun updateUnderlyingNetworks(cm: ConnectivityManager) {
-        val now = System.currentTimeMillis()
-        if (now - lastNetworkUpdate < networkUpdateDebounceMs) {
-            return // Debounce: skip updates within 5 seconds
-        }
-        lastNetworkUpdate = now
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val activeNetwork = cm.activeNetwork
-            if (activeNetwork != null) {
-                setUnderlyingNetworks(arrayOf(activeNetwork))
-                log("info", "Updated underlying network")
-            }
+            val activeNetwork = cm.activeNetwork ?: return
+            // Only call setUnderlyingNetworks when the active network identity changed.
+            // This avoids repeated calls on the same network (Huawei capability spam)
+            // while still reacting immediately to WiFi ↔ LTE transitions.
+            if (activeNetwork == lastUnderlyingNetwork) return
+            lastUnderlyingNetwork = activeNetwork
+            setUnderlyingNetworks(arrayOf(activeNetwork))
+            log("info", "Underlying network updated: $activeNetwork")
         }
     }
 
@@ -514,31 +623,98 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun startForegroundNotification() {
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, "VPN Service", NotificationManager.IMPORTANCE_LOW)
-            manager.createNotificationChannel(channel)
-        }
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+    private fun pendingFlags() =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
+        else
             PendingIntent.FLAG_UPDATE_CURRENT
-        }
+
+    private fun buildConnectedNotification(uploadSpeed: Long, downloadSpeed: Long): Notification {
+        val flags = pendingFlags()
         val stopIntent = PendingIntent.getService(this, 0,
             Intent(this, XrayVpnService::class.java).apply { action = ACTION_DISCONNECT }, flags)
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+        val openIntent = PendingIntent.getActivity(this, 0,
+            packageManager.getLaunchIntentForPackage(packageName)
+                ?.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), flags)
+        val speedText = "↑ ${formatSpeed(uploadSpeed)}  ↓ ${formatSpeed(downloadSpeed)}"
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("TeapodStream VPN")
-            .setContentText("Защищенное соединение активно")
+            .setContentText(speedText)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
+            .setContentIntent(openIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", stopIntent)
             .build()
+    }
+
+    private fun buildDisconnectedNotification(): Notification {
+        val flags = pendingFlags()
+        val connectIntent = PendingIntent.getService(this, 1,
+            Intent(this, XrayVpnService::class.java).apply { action = ACTION_CONNECT_QUICK }, flags)
+        val openIntent = PendingIntent.getActivity(this, 0,
+            packageManager.getLaunchIntentForPackage(packageName)
+                ?.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), flags)
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("TeapodStream VPN")
+            .setContentText("Отключено")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .setContentIntent(openIntent)
+            .addAction(android.R.drawable.ic_media_play, "Подключить", connectIntent)
+            .build()
+    }
+
+    private fun buildMinimalNotification(): Notification =
+        NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_MINIMAL_ID)
+            .setContentTitle("TeapodStream VPN")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .build()
+
+    private fun formatSpeed(bps: Long): String {
+        return when {
+            bps >= 1_000_000 -> "%.1f MB/s".format(bps / 1_000_000.0)
+            bps >= 1_000     -> "%.0f KB/s".format(bps / 1_000.0)
+            else             -> "$bps B/s"
+        }
+    }
+
+    /** Ensure the service is in foreground. Safe to call multiple times. */
+    private fun ensureForeground() {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(NOTIFICATION_CHANNEL_ID, "VPN статус", NotificationManager.IMPORTANCE_LOW)
+                    .apply { description = "Скорость и управление VPN" }
+            )
+            manager.createNotificationChannel(
+                NotificationChannel(NOTIFICATION_CHANNEL_MINIMAL_ID, "VPN (фоновый режим)", NotificationManager.IMPORTANCE_MIN)
+                    .apply { description = "Фоновый VPN-сервис" }
+            )
+        }
+        val notification = if (showNotification) buildDisconnectedNotification() else buildMinimalNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    private fun showDisconnectedNotification() {
+        if (!showNotification) return
+        try {
+            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, buildDisconnectedNotification())
+        } catch (_: Exception) {}
+    }
+
+    private fun updateNotification(uploadSpeed: Long, downloadSpeed: Long) {
+        if (!showNotification) return
+        try {
+            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, buildConnectedNotification(uploadSpeed, downloadSpeed))
+        } catch (_: Exception) {}
     }
 
     private fun log(level: String, message: String) { 

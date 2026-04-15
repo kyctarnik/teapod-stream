@@ -33,35 +33,31 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
-        // Ограничиваем архитектуры в APK согласно целевой платформе
+        // Restrict ABI to the target platform (default: arm64-v8a)
         val targetPlatform = project.findProperty("target-platform") as String?
         val targetAbi = when (targetPlatform) {
             "android-arm64" -> "arm64-v8a"
             "android-x64" -> "x86_64"
-            else -> null
+            else -> "arm64-v8a"
         }
-        
-        if (targetAbi != null) {
-            ndk {
-                abiFilters.clear()
-                abiFilters.add(targetAbi)
-            }
+        ndk {
+            abiFilters.clear()
+            abiFilters.add(targetAbi)
         }
     }
 
     packaging {
         jniLibs {
             val targetPlatform = project.findProperty("target-platform") as String?
+            // Default to arm64-v8a when no platform is specified
             val targetAbi = when (targetPlatform) {
                 "android-arm64" -> "arm64-v8a"
                 "android-x64" -> "x86_64"
-                else -> null
+                else -> "arm64-v8a"
             }
-            if (targetAbi != null) {
-                listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64").forEach { abi ->
-                    if (abi != targetAbi) {
-                        excludes.add("lib/$abi/**")
-                    }
+            listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64").forEach { abi ->
+                if (abi != targetAbi) {
+                    excludes.add("lib/$abi/**")
                 }
             }
         }
@@ -94,8 +90,9 @@ dependencies {
     if (abi != null) {
         implementation(files("libs/teapod-tun2socks-$abi.aar"))
     } else {
-        // Для debug-сборок или если архитектура не указана явно, подключаем все доступные для данного ABI
-        implementation(fileTree("libs") { include("teapod-tun2socks-*.aar") })
+        // No target platform specified — default to arm64-v8a to avoid duplicate-class
+        // errors that occur when both AARs are on the classpath simultaneously.
+        implementation(files("libs/teapod-tun2socks-arm64-v8a.aar"))
     }
 }
 

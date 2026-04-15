@@ -19,6 +19,11 @@ abstract class VpnEngine {
   Future<void> connect(VpnConfig config, VpnEngineOptions options);
   Future<void> disconnect();
 
+  /// Synchronise engine-internal state from the authoritative native value.
+  /// Must update both the internal state field and emit on stateStream so that
+  /// callers like disconnect() don't short-circuit due to a stale guard.
+  void syncState(VpnState nativeState);
+
   Future<int?> pingConfig(VpnConfig config);
   bool supportsConfig(VpnConfig config);
 }
@@ -36,6 +41,7 @@ class VpnEngineOptions {
   final DnsServerConfig dnsServer;
   final VpnMode vpnMode;
   final bool proxyOnly;
+  final bool showNotification;
 
   const VpnEngineOptions({
     required this.socksPort,
@@ -50,5 +56,6 @@ class VpnEngineOptions {
     this.dnsServer = const DnsServerConfig(type: DnsType.udp, address: '1.1.1.1'),
     this.vpnMode = VpnMode.allExcept,
     this.proxyOnly = false,
+    this.showNotification = true,
   });
 }

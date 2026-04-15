@@ -152,12 +152,19 @@ class XrayEngine implements VpnEngine {
     _statsTimer = null;
   }
 
-  /// Restarts stream subscriptions after app wake from background.
-  /// Called by vpn_provider when syncNativeState detects connected state.
-  Future<void> reconnectStreams() async {
-    _startStatsPolling();
-    // Fetch stats immediately instead of waiting for next tick
-    await _fetchStats();
+  /// Force-syncs engine state from the authoritative native value.
+  /// Called by vpn_provider.syncNativeState() so that both XrayEngine._state
+  /// and the Riverpod layer agree — prevents disconnect() from short-circuiting.
+  void syncState(VpnState nativeState) {
+    if (_state != nativeState) {
+      _setState(nativeState); // updates _state and emits on stateStream
+    }
+    if (nativeState == VpnState.connected) {
+      _startStatsPolling();
+      _fetchStats(); // immediate first tick
+    } else {
+      _stopStatsPolling();
+    }
   }
 
   Future<void> _fetchStats() async {
@@ -197,12 +204,8 @@ class XrayEngine implements VpnEngine {
         'excludedPackages': options.excludedPackages.toList(),
         'includedPackages': options.includedPackages.toList(),
         'vpnMode': options.vpnMode.name,
-        'tunAddress': AppConstants.tunAddress,
-        'tunNetmask': AppConstants.tunNetmask,
-        'tunMtu': AppConstants.tunMtu,
-        'tunDns': AppConstants.tunDns,
-        'enableUdp': options.enableUdp,
         'proxyOnly': options.proxyOnly,
+        'showNotification': options.showNotification,
         if (config.ssPrefix != null) 'ssPrefix': config.ssPrefix,
       });
     } on PlatformException catch (e) {

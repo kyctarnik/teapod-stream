@@ -125,6 +125,7 @@ class VpnNotifier extends Notifier<VpnState2> {
       dnsServer: settings.dnsServer,
       vpnMode: settings.vpnMode,
       proxyOnly: settings.proxyOnly,
+      showNotification: settings.showNotification,
     );
 
     await _engine.connect(config, options);
@@ -135,44 +136,43 @@ class VpnNotifier extends Notifier<VpnState2> {
   }
 
   /// Syncs the Flutter VPN state with the native service state.
-  /// Called when the app resumes from background.
+  /// Called when the app resumes from background or after the Activity is recreated.
+  ///
+  /// Routes through [_engine.syncState] so that both XrayEngine._state and
+  /// the Riverpod layer agree — if we patched Riverpod directly the engine's
+  /// disconnect() guard would see a stale "disconnected" and become a no-op.
   Future<void> syncNativeState() async {
+    // Skip during active transitions. The engine already knows the current
+    // state via EventChannel. Overriding here would race with an in-progress
+    // connect() — e.g. permission dialogs cause pause→resume which fires this
+    // method while connect() is still awaiting the native reply.
+    final engineState = _engine.currentState;
+    if (engineState == VpnState.connecting ||
+        engineState == VpnState.disconnecting) return;
+
     try {
       const channel = MethodChannel('com.teapodstream/vpn');
       final nativeState = await channel.invokeMethod<String>('getState');
       if (nativeState == null) return;
 
-      final VpnState mappedState;
-      switch (nativeState) {
-        case 'connected':
-          mappedState = VpnState.connected;
-          break;
-        case 'connecting':
-          mappedState = VpnState.connecting;
-          break;
-        case 'error':
-          mappedState = VpnState.error;
-          break;
-        default:
-          mappedState = VpnState.disconnected;
-      }
+      final mappedState = switch (nativeState) {
+        'connected'    => VpnState.connected,
+        'connecting'   => VpnState.connecting,
+        'error'        => VpnState.error,
+        _              => VpnState.disconnected,
+      };
 
-      if (state.connectionState != mappedState) {
-        state = state.copyWith(connectionState: mappedState);
-      }
-
-      // If native says we're connected but stats aren't flowing,
-      // restart the engine's internal polling
-      if (mappedState == VpnState.connected) {
-        await _engine.reconnectStreams();
-      }
+      // syncState emits on stateStream → _stateSub → Riverpod state update.
+      // It also restarts stats polling when connected.
+      _engine.syncState(mappedState);
     } catch (_) {
       // If sync fails, leave the state as-is
     }
   }
 
   Future<void> toggle() async {
-    if (state.isConnected || state.isConnecting) {
+    if (state.isBusy) return; // already transitioning — ignore tap
+    if (state.isConnected) {
       await disconnect();
     } else {
       await connect();

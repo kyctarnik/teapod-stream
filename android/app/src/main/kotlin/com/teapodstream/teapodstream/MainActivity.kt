@@ -46,21 +46,16 @@ class MainActivity : FlutterActivity() {
                         val excludedPackages = call.argument<List<String>>("excludedPackages") ?: emptyList()
                         val includedPackages = call.argument<List<String>>("includedPackages") ?: emptyList()
                         val vpnMode = call.argument<String>("vpnMode") ?: "allExcept"
-                        val tunAddress = call.argument<String>("tunAddress") ?: "10.0.0.1"
-                        val tunNetmask = call.argument<String>("tunNetmask") ?: "255.255.255.0"
-                        val tunMtu = call.argument<Int>("tunMtu") ?: 1500
-                        val tunDns = call.argument<String>("tunDns") ?: "1.1.1.1"
-                        val enableUdp = call.argument<Boolean>("enableUdp") ?: true
                         val ssPrefix = call.argument<String>("ssPrefix")
                         val proxyOnly = call.argument<Boolean>("proxyOnly") ?: false
+                        val showNotification = call.argument<Boolean>("showNotification") ?: true
 
                         if (proxyOnly) {
                             // Proxy-only: no TUN tunnel, no VPN permission needed
                             startVpnService(
                                 xrayConfig, socksPort, socksUser, socksPassword,
                                 excludedPackages, includedPackages, vpnMode,
-                                tunAddress, tunNetmask, tunMtu, tunDns, enableUdp, ssPrefix,
-                                proxyOnly = true
+                                ssPrefix, proxyOnly = true, showNotification = showNotification
                             )
                             result.success(null)
                         } else {
@@ -68,8 +63,7 @@ class MainActivity : FlutterActivity() {
                                 startVpnService(
                                     xrayConfig, socksPort, socksUser, socksPassword,
                                     excludedPackages, includedPackages, vpnMode,
-                                    tunAddress, tunNetmask, tunMtu, tunDns, enableUdp, ssPrefix,
-                                    proxyOnly = false
+                                    ssPrefix, proxyOnly = false, showNotification = showNotification
                                 )
                                 result.success(null)
                             }
@@ -182,13 +176,9 @@ class MainActivity : FlutterActivity() {
         excludedPackages: List<String>,
         includedPackages: List<String>,
         vpnMode: String,
-        tunAddress: String,
-        tunNetmask: String,
-        tunMtu: Int,
-        tunDns: String,
-        enableUdp: Boolean,
         ssPrefix: String? = null,
         proxyOnly: Boolean = false,
+        showNotification: Boolean = true,
     ) {
         val intent = Intent(this, XrayVpnService::class.java).apply {
             action = XrayVpnService.ACTION_CONNECT
@@ -199,13 +189,9 @@ class MainActivity : FlutterActivity() {
             putExtra(XrayVpnService.EXTRA_EXCLUDED_PACKAGES, ArrayList(excludedPackages))
             putExtra(XrayVpnService.EXTRA_INCLUDED_PACKAGES, ArrayList(includedPackages))
             putExtra(XrayVpnService.EXTRA_VPN_MODE, vpnMode)
-            putExtra(XrayVpnService.EXTRA_TUN_ADDRESS, tunAddress)
-            putExtra(XrayVpnService.EXTRA_TUN_NETMASK, tunNetmask)
-            putExtra(XrayVpnService.EXTRA_TUN_MTU, tunMtu)
-            putExtra(XrayVpnService.EXTRA_TUN_DNS, tunDns)
-            putExtra(XrayVpnService.EXTRA_ENABLE_UDP, enableUdp)
             if (ssPrefix != null) putExtra(XrayVpnService.EXTRA_SS_PREFIX, ssPrefix)
             putExtra(XrayVpnService.EXTRA_PROXY_ONLY, proxyOnly)
+            putExtra(XrayVpnService.EXTRA_SHOW_NOTIFICATION, showNotification)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)

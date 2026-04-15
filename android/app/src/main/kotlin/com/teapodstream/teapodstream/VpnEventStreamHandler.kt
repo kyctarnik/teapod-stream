@@ -14,6 +14,10 @@ object VpnEventStreamHandler : EventChannel.StreamHandler {
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
+        // Replay current state immediately so Flutter is never stale after the
+        // Activity is recreated (e.g. config change, memory reclaim) while the
+        // VPN service is still running in the foreground.
+        sendStateEvent(XrayVpnService.getNativeState())
     }
 
     override fun onCancel(arguments: Any?) {

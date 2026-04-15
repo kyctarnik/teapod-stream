@@ -38,14 +38,26 @@ class XrayConfigBuilder {
         {'tag': 'dns-out', 'protocol': 'dns'}
       ],
       'routing': {
-        'domainStrategy': options.dnsMode == DnsMode.direct ? 'UseIP' : 'IPIfNonMatch',
+        'domainStrategy': 'IPIfNonMatch',
         'rules': [
           if (options.dnsMode == DnsMode.proxy) ...[
+            // Proxy mode: intercept DNS via xray's DNS module → queries go through VPN
             {
               'type': 'field',
               'port': '53',
               'network': 'udp,tcp',
               'outboundTag': 'dns-out',
+            },
+          ],
+          if (options.dnsMode == DnsMode.direct) ...[
+            // Direct mode: DNS queries bypass the VPN tunnel entirely.
+            // xray's own process is excluded from the TUN, so 'direct' outbound
+            // connects straight to the internet without going through the VPN.
+            {
+              'type': 'field',
+              'port': '53',
+              'network': 'udp,tcp',
+              'outboundTag': 'direct',
             },
           ],
           {
@@ -77,14 +89,15 @@ class XrayConfigBuilder {
     List<dynamic> servers;
 
     if (options.dnsMode == DnsMode.direct) {
-      // Direct mode: no DNS block, let system/tun2socks handle DNS
+      // Direct mode: DNS queries bypass the VPN via the 'direct' routing rule above.
+      // Use system resolver for xray's own domain lookups (e.g. routing decisions).
       return {
         'servers': ['localhost'],
-        'queryStrategy': 'UseIP',
+        'queryStrategy': 'UseIPv4',
       };
     }
 
-    // Proxy mode: configure DNS servers for xray
+    // Proxy mode: DNS queries are intercepted and handled by xray's DNS module.
     switch (server.type) {
       case DnsType.udp:
         servers = [
@@ -92,15 +105,15 @@ class XrayConfigBuilder {
         ];
         break;
       case DnsType.doh:
-        // xray supports DoH via https:// prefix
+        // xray expects full HTTPS URL for DoH
         servers = [
           {'address': server.address},
         ];
         break;
       case DnsType.dot:
-        // DoT via tls+local:// prefix in xray
+        // xray DoT format: tls://address:port
         servers = [
-          {'address': 'tls+local://${server.address}:${server.port}'},
+          {'address': 'tls://${server.address}:${server.port}'},
         ];
         break;
     }
@@ -108,7 +121,7 @@ class XrayConfigBuilder {
     return {
       'hosts': {},
       'servers': servers,
-      'queryStrategy': 'UseIP',
+      'queryStrategy': 'UseIPv4',
     };
   }
 

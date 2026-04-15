@@ -27,6 +27,7 @@ class AppSettings {
   final String socksUser;
   final String socksPassword;
   final bool proxyOnly;
+  final bool showNotification;
 
   const AppSettings({
     this.socksPort = AppConstants.defaultSocksPort,
@@ -46,6 +47,7 @@ class AppSettings {
     this.socksUser = '',
     this.socksPassword = '',
     this.proxyOnly = false,
+    this.showNotification = true,
   });
 
   AppSettings copyWith({
@@ -66,6 +68,7 @@ class AppSettings {
     String? socksUser,
     String? socksPassword,
     bool? proxyOnly,
+    bool? showNotification,
   }) {
     return AppSettings(
       socksPort: socksPort ?? this.socksPort,
@@ -85,6 +88,7 @@ class AppSettings {
       socksUser: socksUser ?? this.socksUser,
       socksPassword: socksPassword ?? this.socksPassword,
       proxyOnly: proxyOnly ?? this.proxyOnly,
+      showNotification: showNotification ?? this.showNotification,
     );
   }
 
@@ -111,6 +115,7 @@ class SettingsService {
   static const _socksUserKey = 'socks_user';
   static const _socksPasswordKey = 'socks_password';
   static const _proxyOnlyKey = 'proxy_only';
+  static const _showNotificationKey = 'show_notification';
   static const _vpnModeKey = 'vpn_mode';
   static const _includedPackagesKey = 'included_packages';
 
@@ -145,6 +150,7 @@ class SettingsService {
       socksUser: prefs.getString(_socksUserKey) ?? '',
       socksPassword: prefs.getString(_socksPasswordKey) ?? '',
       proxyOnly: prefs.getBool(_proxyOnlyKey) ?? false,
+      showNotification: prefs.getBool(_showNotificationKey) ?? true,
     );
   }
 
@@ -169,5 +175,6 @@ class SettingsService {
     await prefs.setString(_socksUserKey, settings.socksUser);
     await prefs.setString(_socksPasswordKey, settings.socksPassword);
     await prefs.setBool(_proxyOnlyKey, settings.proxyOnly);
+    await prefs.setBool(_showNotificationKey, settings.showNotification);
   }
 }

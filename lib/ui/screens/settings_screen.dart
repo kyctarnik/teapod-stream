@@ -169,6 +169,22 @@ class _SettingsBodyState extends State<_SettingsBody> {
                   : (v) => widget.onUpdate(
                       widget.settings.copyWith(autoConnect: v)),
             ),
+            const _Divider(),
+            SwitchListTile(
+              title: const Text(
+                'Уведомление',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+              ),
+              subtitle: const Text(
+                'Показывать скорость и кнопку отключения в шторке',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              value: widget.settings.showNotification,
+              onChanged: widget.isConnected
+                  ? null
+                  : (v) => widget.onUpdate(
+                      widget.settings.copyWith(showNotification: v)),
+            ),
           ],
         ),
         if (widget.isConnected) ...[
