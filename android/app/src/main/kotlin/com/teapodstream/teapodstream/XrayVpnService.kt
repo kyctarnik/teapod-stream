@@ -110,7 +110,21 @@ class XrayVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_DISCONNECT -> {
-                stopVpn()
+                // Signal disconnecting immediately so the button turns yellow
+                // even when triggered from the notification (no Flutter-side handler).
+                if (isRunning) {
+                    currentNativeState = "disconnecting"
+                    VpnEventStreamHandler.sendStateEvent("disconnecting")
+                }
+                // Run cleanup off the main thread — Go calls (stopTun2Socks/stopXray)
+                // can block if goroutines are stuck after long uptime or network changes.
+                Thread {
+                    stopVpn()
+                    // Guarantee "disconnected" is always sent — even if stopVpn() was
+                    // a no-op (isRunning was already false when the intent arrived).
+                    currentNativeState = "disconnected"
+                    VpnEventStreamHandler.sendStateEvent("disconnected")
+                }.start()
                 // Keep the service alive as foreground with a "Connect" notification.
                 // This lets users reconnect from the shade without opening the app.
                 showDisconnectedNotification()
@@ -131,8 +145,11 @@ class XrayVpnService : VpnService() {
                 saveConnectionParams(socksPort, socksUser, socksPassword,
                     excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, showNotification)
                 ensureForeground()
-                startVpn(xrayConfig, socksPort, socksUser, socksPassword,
-                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly)
+                // startVpn blocks (waits up to 3s for xray + establishes TUN) — run off main thread.
+                Thread {
+                    startVpn(xrayConfig, socksPort, socksUser, socksPassword,
+                        excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly)
+                }.start()
                 return START_STICKY
             }
             ACTION_CONNECT_QUICK -> {
@@ -145,12 +162,19 @@ class XrayVpnService : VpnService() {
                     if (needsPermission) {
                         openApp()
                     } else {
-                        startVpn(
-                            configFile.readText(),
-                            params.socksPort, params.socksUser, params.socksPassword,
-                            params.excludedPackages, params.includedPackages, params.vpnMode,
-                            params.ssPrefix, params.proxyOnly
-                        )
+                        // Signal connecting immediately so the button turns yellow
+                        // before startVpn() begins its work.
+                        currentNativeState = "connecting"
+                        VpnEventStreamHandler.sendStateEvent("connecting")
+                        val configText = configFile.readText()
+                        Thread {
+                            startVpn(
+                                configText,
+                                params.socksPort, params.socksUser, params.socksPassword,
+                                params.excludedPackages, params.includedPackages, params.vpnMode,
+                                params.ssPrefix, params.proxyOnly
+                            )
+                        }.start()
                     }
                 } else {
                     // No saved params yet — open app so the user can connect normally
@@ -355,9 +379,7 @@ class XrayVpnService : VpnService() {
             }
         } catch (e: Exception) {
             log("error", "Start failed: ${e.message}")
-            currentNativeState = "error"
-            VpnEventStreamHandler.sendStateEvent("error")
-            stopVpn()
+            stopVpn(resultState = "error")
         }
     }
 
@@ -381,6 +403,7 @@ class XrayVpnService : VpnService() {
             Thread.sleep(50)
         }
         if (failed.get()) throw IllegalStateException("xray failed to start")
+        if (!ready.get()) throw IllegalStateException("xray start timeout (3s)")
     }
 
     /**
@@ -487,7 +510,7 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun stopVpn() {
+    private fun stopVpn(resultState: String = "disconnected") {
         if (!isRunning) return  // idempotent — safe to call multiple times
         isRunning = false
         lastUnderlyingNetwork = null
@@ -524,9 +547,9 @@ class XrayVpnService : VpnService() {
             }
             tunInterface = null
         } finally {
-            // Always send disconnected — even if cleanup partially failed
-            currentNativeState = "disconnected"
-            VpnEventStreamHandler.sendStateEvent("disconnected")
+            // Always send final state — even if cleanup partially failed
+            currentNativeState = resultState
+            VpnEventStreamHandler.sendStateEvent(resultState)
         }
     }
 

@@ -277,7 +277,12 @@ class VpnNotifier extends Notifier<VpnState2> {
   /// Syncs Flutter state from native when the app resumes from background.
   /// EventChannel replay on `onListen` handles most cases; this is a fallback.
   Future<void> syncNativeState() async {
-    if (state.isBusy) return;
+    // Skip only "connecting" — it has a 30s safety timeout and syncing could
+    // race with the native startup sequence.
+    // Allow "disconnecting" to sync: it could be a stale state left by a
+    // service restart (e.g. after OS killed the service overnight), and the
+    // user would be stuck with a disabled button otherwise.
+    if (state.connectionState == VpnState.connecting) return;
 
     try {
       const channel = MethodChannel(AppConstants.methodChannel);

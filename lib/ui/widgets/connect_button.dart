@@ -56,7 +56,9 @@ class _ConnectButtonState extends State<ConnectButton>
 
   Color get _outerColor => switch (widget.state) {
         VpnState.connected => AppColors.connectedDim.withValues(alpha: 0.3),
-        VpnState.connecting => AppColors.connecting.withValues(alpha: 0.2),
+        VpnState.connecting ||
+        VpnState.disconnecting =>
+          AppColors.connecting.withValues(alpha: 0.2),
         VpnState.error => AppColors.error.withValues(alpha: 0.2),
         _ => AppColors.primaryDim.withValues(alpha: 0.2),
       };

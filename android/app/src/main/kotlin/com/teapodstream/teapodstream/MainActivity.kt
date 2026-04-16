@@ -204,7 +204,11 @@ class MainActivity : FlutterActivity() {
         val intent = Intent(this, XrayVpnService::class.java).apply {
             action = XrayVpnService.ACTION_DISCONNECT
         }
-        startService(intent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
     private fun pingHost(address: String, port: Int): Int? {
