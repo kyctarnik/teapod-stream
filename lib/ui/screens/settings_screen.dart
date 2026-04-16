@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../providers/update_provider.dart';
 import '../../core/models/dns_config.dart';
 import '../../core/services/settings_service.dart';
 import '../../providers/settings_provider.dart';
@@ -441,6 +442,8 @@ class _SettingsBodyState extends State<_SettingsBody> {
               license: 'MIT License',
               url: 'https://github.com/Wendor/teapod-tun2socks',
             ),
+            const _Divider(),
+            const _UpdateTile(),
           ],
         ),
         const SizedBox(height: 32),
@@ -711,6 +714,111 @@ class _LinkRow extends StatelessWidget {
         }
       },
     );
+  }
+}
+
+class _UpdateTile extends ConsumerWidget {
+  const _UpdateTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final updateState = ref.watch(updateProvider);
+    return switch (updateState) {
+      UpdateIdle() => ListTile(
+          title: const Text('Обновления',
+              style: TextStyle(color: AppColors.textPrimary)),
+          trailing: TextButton(
+            onPressed: () =>
+                ref.read(updateProvider.notifier).checkForUpdate(),
+            child: const Text('Проверить'),
+          ),
+        ),
+      UpdateChecking() => const ListTile(
+          title: Text('Проверка...',
+              style: TextStyle(color: AppColors.textSecondary)),
+          trailing: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      UpdateUpToDate() => const ListTile(
+          title: Text('Обновлений нет',
+              style: TextStyle(color: AppColors.textSecondary)),
+          trailing:
+              Icon(Icons.check_circle_outline, color: AppColors.connected),
+        ),
+      UpdateAvailable(:final info, :final resumableBytes) => ListTile(
+          title: Text('Доступна v${info.version}',
+              style: const TextStyle(color: AppColors.textPrimary)),
+          subtitle: resumableBytes > 0
+              ? Text(
+                  'Продолжить (${(resumableBytes / 1024 / 1024).toStringAsFixed(1)} МБ)',
+                  style: const TextStyle(
+                      color: AppColors.textSecondary, fontSize: 12),
+                )
+              : null,
+          trailing: TextButton(
+            onPressed: () =>
+                ref.read(updateProvider.notifier).startDownload(info),
+            child: Text(resumableBytes > 0 ? 'Продолжить' : 'Скачать'),
+          ),
+        ),
+      UpdateDownloading(:final info, :final downloaded, :final total) =>
+        ListTile(
+          title: Text('Скачивается v${info.version}',
+              style: const TextStyle(color: AppColors.textPrimary)),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 4),
+              LinearProgressIndicator(
+                value: total > 0 ? downloaded / total : null,
+                backgroundColor: AppColors.border,
+                color: AppColors.primary,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                total > 0
+                    ? '${(downloaded / 1024 / 1024).toStringAsFixed(1)} / ${(total / 1024 / 1024).toStringAsFixed(1)} МБ'
+                    : '${(downloaded / 1024 / 1024).toStringAsFixed(1)} МБ',
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 11),
+              ),
+            ],
+          ),
+          trailing: IconButton(
+            icon: const Icon(Icons.cancel_outlined,
+                color: AppColors.textSecondary),
+            onPressed: () =>
+                ref.read(updateProvider.notifier).cancelDownload(),
+          ),
+        ),
+      UpdateDownloaded(:final info, :final filePath) => ListTile(
+          title: Text('v${info.version} готова',
+              style: const TextStyle(color: AppColors.textPrimary)),
+          trailing: TextButton(
+            onPressed: () =>
+                ref.read(updateProvider.notifier).installApk(filePath),
+            style: TextButton.styleFrom(foregroundColor: AppColors.connected),
+            child: const Text('Установить'),
+          ),
+        ),
+      UpdateError(:final message, :final retryInfo) => ListTile(
+          title: Text(message,
+              style:
+                  const TextStyle(color: AppColors.error, fontSize: 13)),
+          trailing: TextButton(
+            onPressed: retryInfo != null
+                ? () => ref
+                    .read(updateProvider.notifier)
+                    .startDownload(retryInfo)
+                : () =>
+                    ref.read(updateProvider.notifier).checkForUpdate(),
+            child: const Text('Повтор'),
+          ),
+        ),
+    };
   }
 }
 

@@ -69,13 +69,18 @@ class SubscriptionService {
     body = body.trim();
     List<String> lines;
 
-    // Try base64 decode first
+    // Try base64 decode first.
+    // Many providers wrap base64 output at 76 chars (RFC 2045), so strip all
+    // whitespace before decoding — otherwise base64Decode throws and we fall
+    // back to treating each 76-char chunk as a separate URI (→ 0 configs).
     try {
-      final padded = body.padRight((body.length + 3) ~/ 4 * 4, '=');
+      final cleaned = body.replaceAll(RegExp(r'\s'), '');
+      final padded = cleaned.padRight((cleaned.length + 3) ~/ 4 * 4, '=');
       final decoded = utf8.decode(base64Decode(padded));
-      lines = decoded.split('\n').where((l) => l.trim().isNotEmpty).toList();
+      lines = decoded.split(RegExp(r'\r?\n')).where((l) => l.trim().isNotEmpty).toList();
     } catch (_) {
-      lines = body.split('\n').where((l) => l.trim().isNotEmpty).toList();
+      // Not base64 — treat as plain-text list of URIs.
+      lines = body.split(RegExp(r'\r?\n')).where((l) => l.trim().isNotEmpty).toList();
     }
 
     final configs = <VpnConfig>[];

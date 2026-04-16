@@ -184,9 +184,13 @@ class XrayConfigBuilder {
     }
   }
 
+  // xray uses "h2" for HTTP/2, not the enum name "http2".
+  static String _networkName(VpnTransport t) =>
+      t == VpnTransport.http2 ? 'h2' : t.name;
+
   static Map<String, dynamic> _buildStreamSettings(VpnConfig config) {
     return {
-      'network': config.transport.name,
+      'network': _networkName(config.transport),
       'security': config.security.name,
       if (config.security == VpnSecurity.reality)
         'realitySettings': {
@@ -202,6 +206,8 @@ class XrayConfigBuilder {
         'tlsSettings': {
           'serverName': config.sni ?? '',
           'allowInsecure': false,
+          if (config.fingerprint != null && config.fingerprint!.isNotEmpty)
+            'fingerprint': config.fingerprint,
         },
       if (config.transport == VpnTransport.ws)
         'wsSettings': {

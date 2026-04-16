@@ -9,6 +9,7 @@ import 'ui/screens/settings_screen.dart';
 import 'providers/config_provider.dart';
 import 'providers/vpn_provider.dart';
 import 'providers/settings_provider.dart';
+import 'providers/update_provider.dart';
 
 class TeapodApp extends StatelessWidget {
   const TeapodApp({super.key});
@@ -52,6 +53,7 @@ class _AppShellState extends ConsumerState<_AppShell> with WidgetsBindingObserve
       if (_autoConnectAttempted) return;
       _autoConnectAttempted = true;
       _tryAutoConnect();
+      _scheduleUpdateCheck();
     });
   }
 
@@ -66,6 +68,16 @@ class _AppShellState extends ConsumerState<_AppShell> with WidgetsBindingObserve
     if (state == AppLifecycleState.resumed) {
       // Sync VPN state with native service when app resumes
       ref.read(vpnProvider.notifier).syncNativeState();
+    }
+  }
+
+  Future<void> _scheduleUpdateCheck() async {
+    await Future.delayed(const Duration(seconds: 5));
+    if (!mounted) return;
+    // Only check if no check has been done yet in this session
+    final updateState = ref.read(updateProvider);
+    if (updateState is UpdateIdle) {
+      ref.read(updateProvider.notifier).checkForUpdate();
     }
   }
 
@@ -94,30 +106,40 @@ class _AppShellState extends ConsumerState<_AppShell> with WidgetsBindingObserve
 
   @override
   Widget build(BuildContext context) {
+    final updateState = ref.watch(updateProvider);
+    final hasUpdate = updateState is UpdateAvailable ||
+        updateState is UpdateDownloading ||
+        updateState is UpdateDownloaded;
     return Scaffold(
       body: IndexedStack(index: _currentIndex, children: _pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (i) => setState(() => _currentIndex = i),
-        destinations: const [
-          NavigationDestination(
+        destinations: [
+          const NavigationDestination(
             icon: Icon(Icons.shield_outlined),
             selectedIcon: Icon(Icons.shield_rounded),
             label: 'VPN',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.vpn_key_outlined),
             selectedIcon: Icon(Icons.vpn_key_rounded),
             label: 'Конфиги',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.list_alt_outlined),
             selectedIcon: Icon(Icons.list_alt_rounded),
             label: 'Логи',
           ),
           NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings_rounded),
+            icon: Badge(
+              isLabelVisible: hasUpdate,
+              child: const Icon(Icons.settings_outlined),
+            ),
+            selectedIcon: Badge(
+              isLabelVisible: hasUpdate,
+              child: const Icon(Icons.settings_rounded),
+            ),
             label: 'Настройки',
           ),
         ],

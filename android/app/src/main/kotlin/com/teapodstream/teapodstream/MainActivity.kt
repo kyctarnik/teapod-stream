@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.util.Base64
@@ -130,6 +131,37 @@ class MainActivity : FlutterActivity() {
 
                     "getState" -> {
                         result.success(XrayVpnService.getNativeState())
+                    }
+
+                    "installApk" -> {
+                        val filePath = call.argument<String>("filePath") ?: run {
+                            result.error("INVALID_ARGS", "filePath required", null)
+                            return@setMethodCallHandler
+                        }
+                        val file = java.io.File(filePath)
+                        if (!file.exists()) {
+                            result.error("FILE_NOT_FOUND", "APK not found: $filePath", null)
+                            return@setMethodCallHandler
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !packageManager.canRequestPackageInstalls()) {
+                            val intent = Intent(
+                                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:$packageName")
+                            )
+                            startActivity(intent)
+                            result.error("PERMISSION_REQUIRED", "Install unknown apps permission needed", null)
+                            return@setMethodCallHandler
+                        }
+                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                            this, "$packageName.fileprovider", file
+                        )
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        }
+                        startActivity(intent)
+                        result.success(null)
                     }
 
                     else -> result.notImplemented()
