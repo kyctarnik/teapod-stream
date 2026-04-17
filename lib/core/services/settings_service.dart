@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_log_entry.dart';
 import '../models/dns_config.dart';
+import '../models/routing_config.dart';
 import '../constants/app_constants.dart';
 import 'storage_secure_service.dart';
 import 'storage_migration_service.dart';
@@ -31,6 +32,7 @@ class AppSettings {
   final bool proxyOnly;
   final bool showNotification;
   final bool killSwitchEnabled;
+  final RoutingMode routingMode;
 
   const AppSettings({
     this.socksPort = AppConstants.defaultSocksPort,
@@ -52,6 +54,7 @@ class AppSettings {
     this.proxyOnly = false,
     this.showNotification = true,
     this.killSwitchEnabled = false,
+    this.routingMode = RoutingMode.global,
   });
 
   AppSettings copyWith({
@@ -74,6 +77,7 @@ class AppSettings {
     bool? proxyOnly,
     bool? showNotification,
     bool? killSwitchEnabled,
+    RoutingMode? routingMode,
   }) {
     return AppSettings(
       socksPort: socksPort ?? this.socksPort,
@@ -95,6 +99,7 @@ class AppSettings {
       proxyOnly: proxyOnly ?? this.proxyOnly,
       showNotification: showNotification ?? this.showNotification,
       killSwitchEnabled: killSwitchEnabled ?? this.killSwitchEnabled,
+      routingMode: routingMode ?? this.routingMode,
     );
   }
 
@@ -123,6 +128,7 @@ class SettingsService {
   static const _vpnModeKey = 'vpn_mode';
   static const _includedPackagesKey = 'included_packages';
   static const _killSwitchKey = 'kill_switch';
+  static const _routingModeKey = 'routing_mode';
 
   final _secure = StorageSecureService();
 
@@ -161,6 +167,10 @@ class SettingsService {
       proxyOnly: prefs.getBool(_proxyOnlyKey) ?? false,
       showNotification: prefs.getBool(_showNotificationKey) ?? true,
       killSwitchEnabled: prefs.getBool(_killSwitchKey) ?? false,
+      routingMode: RoutingMode.values.firstWhere(
+        (e) => e.name == prefs.getString(_routingModeKey),
+        orElse: () => RoutingMode.global,
+      ),
     );
   }
 
@@ -185,6 +195,7 @@ class SettingsService {
     await prefs.setBool(_proxyOnlyKey, settings.proxyOnly);
     await prefs.setBool(_showNotificationKey, settings.showNotification);
     await prefs.setBool(_killSwitchKey, settings.killSwitchEnabled);
+    await prefs.setString(_routingModeKey, settings.routingMode.name);
     // SOCKS credentials go to encrypted storage
     await _secure.writeSocksCredentials(settings.socksUser, settings.socksPassword);
   }

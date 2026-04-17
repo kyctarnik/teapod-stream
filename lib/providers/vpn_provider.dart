@@ -388,6 +388,7 @@ class VpnNotifier extends Notifier<VpnState2> {
       proxyOnly: settings.proxyOnly,
       showNotification: settings.showNotification,
       killSwitch: settings.killSwitchEnabled,
+      routingMode: settings.routingMode,
     );
     _heartbeatSocksPort = actualSocksPort;
     _heartbeatUser = socksCredentials.user;

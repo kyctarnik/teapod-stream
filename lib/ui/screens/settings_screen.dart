@@ -5,6 +5,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../providers/update_provider.dart';
 import '../../core/models/dns_config.dart';
+import '../../core/models/routing_config.dart';
 import '../../core/services/settings_service.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/vpn_provider.dart';
@@ -224,6 +225,41 @@ class _SettingsBodyState extends State<_SettingsBody> {
                       widget.settings.copyWith(killSwitchEnabled: v)),
             ),
           ],
+        ),
+        const SizedBox(height: 20),
+
+        // Routing section
+        _SectionHeader('Маршрутизация'),
+        const SizedBox(height: 8),
+        _SettingsCard(
+          children: RoutingMode.values.map((mode) {
+            final isLast = mode == RoutingMode.values.last;
+            return Column(
+              children: [
+                RadioListTile<RoutingMode>(
+                  value: mode,
+                  groupValue: widget.settings.routingMode,
+                  title: Text(
+                    mode.title,
+                    style: TextStyle(
+                      color: widget.isConnected ? AppColors.textDisabled : AppColors.textPrimary,
+                      fontSize: 15,
+                    ),
+                  ),
+                  subtitle: Text(
+                    mode.subtitle,
+                    style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                  ),
+                  onChanged: widget.isConnected
+                      ? null
+                      : (v) => v != null
+                          ? widget.onUpdate(widget.settings.copyWith(routingMode: v))
+                          : null,
+                ),
+                if (!isLast) const _Divider(),
+              ],
+            );
+          }).toList(),
         ),
         const SizedBox(height: 20),
 

@@ -2,6 +2,7 @@ import 'dart:convert';
 import '../../core/interfaces/vpn_engine.dart';
 import '../../core/models/vpn_config.dart';
 import '../../core/models/dns_config.dart';
+import '../../core/models/routing_config.dart';
 
 class XrayConfigBuilder {
   static Map<String, dynamic> build(VpnConfig config, VpnEngineOptions options) {
@@ -27,7 +28,9 @@ class XrayConfigBuilder {
           'sniffing': {
             'enabled': true,
             'destOverride': ['http', 'tls', 'quic'],
-            'routeOnly': false,
+            // routeOnly: true preserves original IP for geoip matching — without it xray
+            // re-resolves the domain via VPN DNS and may get CDN IPs outside the target geo
+            'routeOnly': options.routingMode != RoutingMode.global,
           },
         }
       ],
@@ -60,10 +63,11 @@ class XrayConfigBuilder {
               'outboundTag': 'direct',
             },
           ],
+          ..._buildGeoRules(options.routingMode),
           {
             'type': 'field',
             'inboundTag': ['socks-in'],
-            'outboundTag': 'proxy',
+            'outboundTag': options.routingMode == RoutingMode.onlyRU ? 'direct' : 'proxy',
           }
         ],
       },
@@ -81,6 +85,29 @@ class XrayConfigBuilder {
           'statsInboundDownlink': false,
         }
       },
+    };
+  }
+
+  static List<Map<String, dynamic>> _buildGeoRules(RoutingMode mode) {
+    return switch (mode) {
+      RoutingMode.global => [],
+      RoutingMode.bypassLocal => [
+          {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'direct'},
+        ],
+      // domain:ru / domain:xn--p1ai (.рф) match without DNS resolution — reliable even via VPN
+      RoutingMode.bypassRU => [
+          {'type': 'field', 'domain': ['domain:ru', 'domain:xn--p1ai'], 'outboundTag': 'direct'},
+          {'type': 'field', 'ip': ['geoip:ru', 'geoip:private'], 'outboundTag': 'direct'},
+        ],
+      RoutingMode.bypassCN => [
+          {'type': 'field', 'domain': ['domain:cn', 'domain:com.cn', 'domain:net.cn', 'domain:org.cn'], 'outboundTag': 'direct'},
+          {'type': 'field', 'ip': ['geoip:cn', 'geoip:private'], 'outboundTag': 'direct'},
+        ],
+      // onlyRU: RU traffic → proxy, catch-all (socks-in) → direct (handled in routing rules)
+      RoutingMode.onlyRU => [
+          {'type': 'field', 'domain': ['domain:ru', 'domain:xn--p1ai'], 'outboundTag': 'proxy'},
+          {'type': 'field', 'ip': ['geoip:ru'], 'outboundTag': 'proxy'},
+        ],
     };
   }
 
