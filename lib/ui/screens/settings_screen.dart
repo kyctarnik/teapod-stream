@@ -207,6 +207,22 @@ class _SettingsBodyState extends State<_SettingsBody> {
                   : (v) => widget.onUpdate(
                       widget.settings.copyWith(showNotification: v)),
             ),
+            const _Divider(),
+            SwitchListTile(
+              title: const Text(
+                'Kill Switch',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+              ),
+              subtitle: const Text(
+                'Блокировать трафик при обрыве VPN (не работает в режиме прокси)',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              value: widget.settings.killSwitchEnabled,
+              onChanged: widget.isConnected
+                  ? null
+                  : (v) => widget.onUpdate(
+                      widget.settings.copyWith(killSwitchEnabled: v)),
+            ),
           ],
         ),
         const SizedBox(height: 20),

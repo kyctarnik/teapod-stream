@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -51,6 +52,11 @@ class VpnNotifier extends Notifier<VpnState2> {
   Timer? _disconnectTimeout;
   DateTime? _connectedAt;
 
+  Timer? _heartbeatTimer;
+  int _heartbeatFailures = 0;
+  int _heartbeatSocksPort = 0;
+  bool _heartbeatProxyOnly = false;
+
   @override
   VpnState2 build() {
     _engine = XrayEngine();
@@ -72,6 +78,7 @@ class VpnNotifier extends Notifier<VpnState2> {
       _eventSub?.cancel();
       _connectTimeout?.cancel();
       _disconnectTimeout?.cancel();
+      _heartbeatTimer?.cancel();
     });
 
     return const VpnState2();
@@ -114,6 +121,9 @@ class VpnNotifier extends Notifier<VpnState2> {
       _connectedAt ??= DateTime.now();
       _connectTimeout?.cancel();
       _connectTimeout = null;
+      if (!_heartbeatProxyOnly) {
+        _startHeartbeat();
+      }
     } else if (nativeState == VpnState.disconnected ||
         nativeState == VpnState.error) {
       _connectedAt = null;
@@ -121,6 +131,7 @@ class VpnNotifier extends Notifier<VpnState2> {
       _connectTimeout = null;
       _disconnectTimeout?.cancel();
       _disconnectTimeout = null;
+      _stopHeartbeat();
     } else if (nativeState == VpnState.connecting) {
       if (_connectTimeout == null) {
         _connectTimeout = Timer(const Duration(seconds: 30), () {
@@ -180,6 +191,93 @@ class VpnNotifier extends Notifier<VpnState2> {
         connectedDuration: duration,
       ),
     );
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatFailures = 0;
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _probeProxy();
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _heartbeatFailures = 0;
+  }
+
+  Future<void> _probeProxy() async {
+    if (!state.isConnected || _heartbeatSocksPort == 0) return;
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        _heartbeatSocksPort,
+        timeout: const Duration(seconds: 5),
+      );
+      socket.setOption(SocketOption.tcpNoDelay, true);
+
+      final completer = Completer<bool>();
+      var phase = 0;
+
+      socket.listen(
+        (data) {
+          if (completer.isCompleted) return;
+          if (phase == 0) {
+            if (data.length >= 2 && data[0] == 0x05 && data[1] == 0x00) {
+              phase = 1;
+              // CONNECT 1.1.1.1:53 via SOCKS5
+              socket!.add([0x05, 0x01, 0x00, 0x01, 1, 1, 1, 1, 0, 53]);
+            } else {
+              completer.complete(false);
+            }
+          } else if (phase == 1) {
+            completer.complete(
+                data.length >= 2 && data[0] == 0x05 && data[1] == 0x00);
+          }
+        },
+        onError: (e) {
+          if (!completer.isCompleted) completer.completeError(e);
+        },
+        onDone: () {
+          if (!completer.isCompleted) completer.complete(false);
+        },
+        cancelOnError: true,
+      );
+
+      // Send SOCKS5 greeting: version=5, 1 auth method, no-auth
+      socket.add([0x05, 0x01, 0x00]);
+
+      final ok = await completer.future.timeout(const Duration(seconds: 8));
+      if (ok) {
+        _heartbeatFailures = 0;
+        return;
+      }
+      throw Exception('SOCKS5 probe failed');
+    } catch (_) {
+      _heartbeatFailures++;
+      if (_heartbeatFailures >= 3 && state.isConnected) {
+        _stopHeartbeat();
+        ref.read(logServiceProvider.notifier).add(VpnLogEntry(
+          timestamp: DateTime.now(),
+          level: LogLevel.warning,
+          message: 'Heartbeat failed $_heartbeatFailures times, reconnecting',
+          source: 'vpn',
+        ));
+        await _reconnect();
+      }
+    } finally {
+      try {
+        socket?.destroy();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _reconnect() async {
+    await disconnect();
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    await connect();
   }
 
   Future<void> connect() async {
@@ -250,7 +348,10 @@ class VpnNotifier extends Notifier<VpnState2> {
       vpnMode: settings.vpnMode,
       proxyOnly: settings.proxyOnly,
       showNotification: settings.showNotification,
+      killSwitch: settings.killSwitchEnabled,
     );
+    _heartbeatSocksPort = actualSocksPort;
+    _heartbeatProxyOnly = settings.proxyOnly;
 
     try {
       await _engine.connect(config, options);

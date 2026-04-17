@@ -28,6 +28,7 @@ class AppSettings {
   final String socksPassword;
   final bool proxyOnly;
   final bool showNotification;
+  final bool killSwitchEnabled;
 
   const AppSettings({
     this.socksPort = AppConstants.defaultSocksPort,
@@ -48,6 +49,7 @@ class AppSettings {
     this.socksPassword = '',
     this.proxyOnly = false,
     this.showNotification = true,
+    this.killSwitchEnabled = false,
   });
 
   AppSettings copyWith({
@@ -69,6 +71,7 @@ class AppSettings {
     String? socksPassword,
     bool? proxyOnly,
     bool? showNotification,
+    bool? killSwitchEnabled,
   }) {
     return AppSettings(
       socksPort: socksPort ?? this.socksPort,
@@ -89,6 +92,7 @@ class AppSettings {
       socksPassword: socksPassword ?? this.socksPassword,
       proxyOnly: proxyOnly ?? this.proxyOnly,
       showNotification: showNotification ?? this.showNotification,
+      killSwitchEnabled: killSwitchEnabled ?? this.killSwitchEnabled,
     );
   }
 
@@ -118,6 +122,7 @@ class SettingsService {
   static const _showNotificationKey = 'show_notification';
   static const _vpnModeKey = 'vpn_mode';
   static const _includedPackagesKey = 'included_packages';
+  static const _killSwitchKey = 'kill_switch';
 
   Future<AppSettings> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -151,6 +156,7 @@ class SettingsService {
       socksPassword: prefs.getString(_socksPasswordKey) ?? '',
       proxyOnly: prefs.getBool(_proxyOnlyKey) ?? false,
       showNotification: prefs.getBool(_showNotificationKey) ?? true,
+      killSwitchEnabled: prefs.getBool(_killSwitchKey) ?? false,
     );
   }
 
@@ -176,5 +182,6 @@ class SettingsService {
     await prefs.setString(_socksPasswordKey, settings.socksPassword);
     await prefs.setBool(_proxyOnlyKey, settings.proxyOnly);
     await prefs.setBool(_showNotificationKey, settings.showNotification);
+    await prefs.setBool(_killSwitchKey, settings.killSwitchEnabled);
   }
 }

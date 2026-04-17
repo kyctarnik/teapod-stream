@@ -52,13 +52,15 @@ class MainActivity : FlutterActivity() {
                         val ssPrefix = call.argument<String>("ssPrefix")
                         val proxyOnly = call.argument<Boolean>("proxyOnly") ?: false
                         val showNotification = call.argument<Boolean>("showNotification") ?: true
+                        val killSwitch = call.argument<Boolean>("killSwitch") ?: false
 
                         if (proxyOnly) {
                             // Proxy-only: no TUN tunnel, no VPN permission needed
                             startVpnService(
                                 xrayConfig, socksPort, socksUser, socksPassword,
                                 excludedPackages, includedPackages, vpnMode,
-                                ssPrefix, proxyOnly = true, showNotification = showNotification
+                                ssPrefix, proxyOnly = true, showNotification = showNotification,
+                                killSwitch = killSwitch
                             )
                             result.success(null)
                         } else {
@@ -66,7 +68,8 @@ class MainActivity : FlutterActivity() {
                                 startVpnService(
                                     xrayConfig, socksPort, socksUser, socksPassword,
                                     excludedPackages, includedPackages, vpnMode,
-                                    ssPrefix, proxyOnly = false, showNotification = showNotification
+                                    ssPrefix, proxyOnly = false, showNotification = showNotification,
+                                    killSwitch = killSwitch
                                 )
                                 result.success(null)
                             }
@@ -226,6 +229,7 @@ class MainActivity : FlutterActivity() {
         ssPrefix: String? = null,
         proxyOnly: Boolean = false,
         showNotification: Boolean = true,
+        killSwitch: Boolean = false,
     ) {
         requestBatteryOptimizationExemption()
         val intent = Intent(this, XrayVpnService::class.java).apply {
@@ -240,6 +244,7 @@ class MainActivity : FlutterActivity() {
             if (ssPrefix != null) putExtra(XrayVpnService.EXTRA_SS_PREFIX, ssPrefix)
             putExtra(XrayVpnService.EXTRA_PROXY_ONLY, proxyOnly)
             putExtra(XrayVpnService.EXTRA_SHOW_NOTIFICATION, showNotification)
+            putExtra(XrayVpnService.EXTRA_KILL_SWITCH, killSwitch)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)

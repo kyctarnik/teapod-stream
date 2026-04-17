@@ -46,6 +46,7 @@ class XrayVpnService : VpnService() {
         const val EXTRA_SS_PREFIX = "ss_prefix" // hex-encoded Outline prefix bytes
         const val EXTRA_PROXY_ONLY = "proxy_only" // start only SOCKS proxy, no VPN tunnel
         const val EXTRA_SHOW_NOTIFICATION = "show_notification" // show rich notification with speed
+        const val EXTRA_KILL_SWITCH = "kill_switch" // block traffic when VPN drops unexpectedly
 
         // Static state tracker for querying from Dart
         @Volatile private var currentNativeState: String = "disconnected"
@@ -91,6 +92,8 @@ class XrayVpnService : VpnService() {
     private var prefixProxy: PrefixTcpProxy? = null
     private var showNotification = true
     private var wakeLock: PowerManager.WakeLock? = null
+    private var killSwitchEnabled = false
+    private var proxyOnlyMode = false
 
     // TUN parameters — always the same fixed values; defined once here to avoid
     // scattering magic strings across the file. The Dart side uses the same constants
@@ -120,7 +123,7 @@ class XrayVpnService : VpnService() {
                 // Run cleanup off the main thread — Go calls (stopTun2Socks/stopXray)
                 // can block if goroutines are stuck after long uptime or network changes.
                 Thread {
-                    val stopThread = Thread { stopVpn() }
+                    val stopThread = Thread { stopVpn(explicit = true) }
                     stopThread.start()
                     try {
                         stopThread.join(5000) // safety timeout — wait max 5s for движок to stop
@@ -151,14 +154,15 @@ class XrayVpnService : VpnService() {
                 val vpnMode = intent.getStringExtra(EXTRA_VPN_MODE) ?: "allExcept"
                 val ssPrefix = intent.getStringExtra(EXTRA_SS_PREFIX)
                 val proxyOnly = intent.getBooleanExtra(EXTRA_PROXY_ONLY, false)
+                val killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, false)
                 // Persist dynamic params so ACTION_CONNECT_QUICK can reconnect without the app
                 saveConnectionParams(socksPort, socksUser, socksPassword,
-                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, showNotification)
+                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, showNotification, killSwitch)
                 ensureForeground()
                 // startVpn blocks (waits up to 3s for xray + establishes TUN) — run off main thread.
                 Thread {
                     startVpn(xrayConfig, socksPort, socksUser, socksPassword,
-                        excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly)
+                        excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, killSwitch)
                 }.start()
                 return START_STICKY
             }
@@ -182,7 +186,7 @@ class XrayVpnService : VpnService() {
                                 configText,
                                 params.socksPort, params.socksUser, params.socksPassword,
                                 params.excludedPackages, params.includedPackages, params.vpnMode,
-                                params.ssPrefix, params.proxyOnly
+                                params.ssPrefix, params.proxyOnly, params.killSwitch
                             )
                         }.start()
                     }
@@ -212,12 +216,14 @@ class XrayVpnService : VpnService() {
         val ssPrefix: String?,
         val proxyOnly: Boolean,
         val showNotification: Boolean,
+        val killSwitch: Boolean,
     )
 
     private fun saveConnectionParams(
         socksPort: Int, socksUser: String, socksPassword: String,
         excludedPackages: List<String>, includedPackages: List<String>,
         vpnMode: String, ssPrefix: String?, proxyOnly: Boolean, showNotification: Boolean,
+        killSwitch: Boolean,
     ) {
         try {
             val json = org.json.JSONObject().apply {
@@ -230,6 +236,7 @@ class XrayVpnService : VpnService() {
                 if (ssPrefix != null) put("ssPrefix", ssPrefix)
                 put("proxyOnly", proxyOnly)
                 put("showNotification", showNotification)
+                put("killSwitch", killSwitch)
             }
             File(filesDir, "last_connection.json").writeText(json.toString())
         } catch (e: Exception) {
@@ -255,6 +262,7 @@ class XrayVpnService : VpnService() {
                 ssPrefix = json.optString("ssPrefix").takeIf { it.isNotEmpty() },
                 proxyOnly = json.optBoolean("proxyOnly", false),
                 showNotification = json.optBoolean("showNotification", true),
+                killSwitch = json.optBoolean("killSwitch", false),
             )
         } catch (_: Exception) {
             null
@@ -277,9 +285,15 @@ class XrayVpnService : VpnService() {
         vpnMode: String,
         ssPrefix: String? = null,
         proxyOnly: Boolean = false,
+        killSwitch: Boolean = false,
     ) {
         if (isRunning) return
+        // Close any TUN left open by a previous kill-switch blocking state
+        try { tunInterface?.close() } catch (_: Exception) {}
+        tunInterface = null
         isRunning = true
+        killSwitchEnabled = killSwitch
+        proxyOnlyMode = proxyOnly
         currentNativeState = "connecting"
         VpnEventStreamHandler.sendStateEvent("connecting")
         log("info", "Starting VPN")
@@ -536,7 +550,7 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun stopVpn(resultState: String = "disconnected") {
+    private fun stopVpn(resultState: String = "disconnected", explicit: Boolean = false) {
         if (!isRunning) return  // idempotent — safe to call multiple times
         isRunning = false
         lastUnderlyingNetwork = null
@@ -569,12 +583,23 @@ class XrayVpnService : VpnService() {
                 log("warning", "stopXray failed: ${e.message}")
             }
 
-            try {
-                tunInterface?.close()
-            } catch (e: Exception) {
-                log("warning", "tunInterface.close failed: ${e.message}")
+            // Kill switch: on unexpected drop (non-explicit), keep TUN open so all traffic
+            // is routed to the TUN but nobody reads it → effectively blocked.
+            // setUnderlyingNetworks(emptyArray) signals Android there is no real network.
+            val activateKillSwitch = killSwitchEnabled && !explicit && !proxyOnlyMode
+                    && tunInterface != null
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+            if (activateKillSwitch) {
+                setUnderlyingNetworks(emptyArray())
+                log("info", "Kill switch active: TUN kept open, underlying networks cleared")
+            } else {
+                try {
+                    tunInterface?.close()
+                } catch (e: Exception) {
+                    log("warning", "tunInterface.close failed: ${e.message}")
+                }
+                tunInterface = null
             }
-            tunInterface = null
         } finally {
             // Always send final state — even if cleanup partially failed
             currentNativeState = resultState

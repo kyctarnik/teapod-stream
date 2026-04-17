@@ -29,6 +29,7 @@ class VpnEngineOptions {
   final VpnMode vpnMode;
   final bool proxyOnly;
   final bool showNotification;
+  final bool killSwitch;
 
   const VpnEngineOptions({
     required this.socksPort,
@@ -44,5 +45,6 @@ class VpnEngineOptions {
     this.vpnMode = VpnMode.allExcept,
     this.proxyOnly = false,
     this.showNotification = true,
+    this.killSwitch = false,
   });
 }
