@@ -14,6 +14,7 @@ import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.system.OsConstants
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -89,6 +90,7 @@ class XrayVpnService : VpnService() {
     private var lastUnderlyingNetwork: Network? = null
     private var prefixProxy: PrefixTcpProxy? = null
     private var showNotification = true
+    private var wakeLock: PowerManager.WakeLock? = null
 
     // TUN parameters — always the same fixed values; defined once here to avoid
     // scattering magic strings across the file. The Dart side uses the same constants
@@ -191,7 +193,9 @@ class XrayVpnService : VpnService() {
                 return START_STICKY
             }
         }
-        // Service restarted by Android after being killed — show disconnected notification
+        // Service restarted by Android after being killed — must call startForeground() first
+        // (Android 8+ requires startForeground within 5s of startForegroundService)
+        ensureForeground()
         showDisconnectedNotification()
         return START_STICKY
     }
@@ -303,6 +307,7 @@ class XrayVpnService : VpnService() {
 
                 log("info", "xray started (proxy-only, SOCKS on port $socksPort)")
                 startStatsMonitoring()
+                acquireWakeLock()
                 currentNativeState = "connected"
                 VpnEventStreamHandler.sendStateEvent("connected")
                 log("info", "Proxy-only mode active")
@@ -382,6 +387,7 @@ class XrayVpnService : VpnService() {
 
                 startStatsMonitoring()
                 registerNetworkCallback()
+                acquireWakeLock()
                 currentNativeState = "connected"
                 VpnEventStreamHandler.sendStateEvent("connected")
                 log("info", "VPN connected successfully")
@@ -519,10 +525,24 @@ class XrayVpnService : VpnService() {
         }
     }
 
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock?.release()
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TeapodStream:VpnWakeLock")
+            wakeLock?.acquire()
+        } catch (e: Exception) {
+            log("warning", "Failed to acquire wake lock: ${e.message}")
+        }
+    }
+
     private fun stopVpn(resultState: String = "disconnected") {
         if (!isRunning) return  // idempotent — safe to call multiple times
         isRunning = false
         lastUnderlyingNetwork = null
+
+        try { wakeLock?.release() } catch (_: Exception) {}
+        wakeLock = null
 
         try {
             try { unregisterNetworkCallback() } catch (e: Exception) {

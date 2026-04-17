@@ -7,6 +7,8 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -200,6 +202,19 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:$packageName"))
+                    startActivity(intent)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
     private fun startVpnService(
         xrayConfig: String,
         socksPort: Int,
@@ -212,6 +227,7 @@ class MainActivity : FlutterActivity() {
         proxyOnly: Boolean = false,
         showNotification: Boolean = true,
     ) {
+        requestBatteryOptimizationExemption()
         val intent = Intent(this, XrayVpnService::class.java).apply {
             action = XrayVpnService.ACTION_CONNECT
             putExtra(XrayVpnService.EXTRA_XRAY_CONFIG, xrayConfig)
