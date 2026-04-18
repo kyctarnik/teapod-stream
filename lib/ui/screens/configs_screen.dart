@@ -23,6 +23,7 @@ class ConfigsScreen extends ConsumerStatefulWidget {
 
 class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
   final Set<String> _expandedSubs = {};
+  bool _isPinging = false;
 
   @override
   Widget build(BuildContext context) {
@@ -33,6 +34,24 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
       appBar: AppBar(
         title: const Text('Конфигурации'),
         actions: [
+          if (_isPinging)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.network_ping_rounded),
+              tooltip: 'Проверить пинг',
+              onPressed: configStateAsync.maybeWhen(
+                data: (s) => s.configs.isNotEmpty ? () => _pingAll(s.configs) : null,
+                orElse: () => null,
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.add_rounded),
             onPressed: () => _openAddConfig(context),
@@ -92,6 +111,20 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
 
   void _selectConfig(WidgetRef ref, VpnConfig config) {
     ref.read(configProvider.notifier).setActiveConfig(config.id);
+    final vpnState = ref.read(vpnProvider);
+    if (vpnState.isConnected || vpnState.isBusy) {
+      ref.read(vpnProvider.notifier).reconnectWithNewConfig();
+    }
+  }
+
+  Future<void> _pingAll(List<VpnConfig> configs) async {
+    if (_isPinging) return;
+    setState(() => _isPinging = true);
+    try {
+      await ref.read(vpnProvider.notifier).pingAllConfigs();
+    } finally {
+      if (mounted) setState(() => _isPinging = false);
+    }
   }
 
   Future<void> _showConfigMenu(

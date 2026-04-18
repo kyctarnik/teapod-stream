@@ -99,54 +99,50 @@ class ConfigCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      config.name,
-                      style: const TextStyle(
-                        color: AppColors.textPrimary,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 4),
                     Row(
                       children: [
-                        Text(
-                          '${config.address}:${config.port}',
-                          style: const TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 12,
+                        Expanded(
+                          child: Text(
+                            config.name,
+                            style: const TextStyle(
+                              color: AppColors.textPrimary,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        _Tag(_securityLabel),
-                        const SizedBox(width: 4),
-                        _Tag(_transportLabel),
                         if (config.latencyMs != null) ...[
                           const SizedBox(width: 8),
                           _LatencyBadge(config.latencyMs!),
                         ],
                       ],
                     ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '${config.address}:${config.port}',
+                            style: const TextStyle(
+                              color: AppColors.textSecondary,
+                              fontSize: 12,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        _Tag(_securityLabel),
+                        const SizedBox(width: 4),
+                        _Tag(_transportLabel),
+                      ],
+                    ),
                   ],
                 ),
               ),
-              // Active indicator or menu hint
-              if (isActive)
-                Icon(
-                  isConnected ? Icons.check_circle : Icons.radio_button_on,
-                  color: isConnected
-                      ? AppColors.connected
-                      : AppColors.primary,
-                  size: 20,
-                )
-              else
-                const Icon(
-                  Icons.more_vert_rounded,
-                  color: AppColors.textDisabled,
-                  size: 20,
-                ),
+
             ],
           ),
         ),

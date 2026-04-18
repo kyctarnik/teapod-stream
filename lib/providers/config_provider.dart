@@ -85,12 +85,13 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
 
   Future<void> setActiveConfig(String? id) async {
     final current = state.maybeWhen(data: (d) => d, orElse: () => null) ?? const ConfigState();
-    await storage.saveActiveConfigId(id);
+    // Update in-memory state immediately so connect() reads the right config
     if (id == null) {
       state = AsyncData(current.copyWith(clearActive: true));
     } else {
       state = AsyncData(current.copyWith(activeConfigId: id));
     }
+    await storage.saveActiveConfigId(id);
   }
 
   Future<void> updateConfig(VpnConfig updated) async {
@@ -115,14 +116,25 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
       // Update existing: remove old configs, add new ones
       subId = existing.first.id;
       final oldConfigs = current.configs.where((c) => c.subscriptionId == subId).toList();
+      // Preserve ping results by matching address:port
+      final latencyMap = <String, int>{};
+      for (final old in oldConfigs) {
+        if (old.latencyMs != null) latencyMap['${old.address}:${old.port}'] = old.latencyMs!;
+      }
       for (final old in oldConfigs) {
         await storage.removeConfig(old.id);
       }
       final (tagged, fetchResult) = await _fetchAndTagConfigs(url, subId, allowSelfSigned: allowSelfSigned);
-      newConfigs = tagged;
+      newConfigs = tagged.map((c) {
+        final ms = latencyMap['${c.address}:${c.port}'];
+        return ms != null ? c.copyWith(latencyMs: ms) : c;
+      }).toList();
 
-      final updatedSub = existing.first.copyWith(
-        name: name ?? existing.first.name,
+      final updatedSub = Subscription(
+        id: subId,
+        name: name ?? fetchResult.profileTitle ?? existing.first.name,
+        url: existing.first.url,
+        createdAt: existing.first.createdAt,
         lastFetchedAt: DateTime.now(),
         expireAt: fetchResult.expireAt,
         uploadBytes: fetchResult.uploadBytes,

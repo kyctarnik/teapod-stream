@@ -162,9 +162,9 @@ class SubscriptionService {
           case 'download':
             downloadBytes = val;
           case 'total':
-            totalBytes = val;
+            if (val > 0) totalBytes = val;
           case 'expire':
-            expireAt = DateTime.fromMillisecondsSinceEpoch(val * 1000);
+            if (val > 0) expireAt = DateTime.fromMillisecondsSinceEpoch(val * 1000);
         }
       }
     }

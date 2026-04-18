@@ -476,6 +476,23 @@ class VpnNotifier extends Notifier<VpnState2> {
     }
   }
 
+  Future<void> reconnectWithNewConfig() async {
+    await _reconnect();
+  }
+
+  Future<void> pingAllConfigs() async {
+    final configState = ref.read(configProvider).maybeWhen(data: (d) => d, orElse: () => null);
+    if (configState == null) return;
+    // Ping in parallel, then update state sequentially to avoid race condition
+    final pinged = await Future.wait(configState.configs.map((config) async {
+      final ms = await _engine.pingConfig(config);
+      return config.copyWith(latencyMs: ms);
+    }));
+    for (final updated in pinged) {
+      await ref.read(configProvider.notifier).updateConfig(updated);
+    }
+  }
+
   VpnState get connectionState => state.connectionState;
 }
 
