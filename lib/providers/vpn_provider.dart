@@ -147,25 +147,21 @@ class VpnNotifier extends Notifier<VpnState2> {
       _disconnectTimeout = null;
       _stopHeartbeat();
     } else if (nativeState == VpnState.connecting) {
-      if (_connectTimeout == null) {
-        _connectTimeout = Timer(const Duration(seconds: 30), () {
-          if (state.connectionState == VpnState.connecting) {
-            state = state.copyWith(
-                connectionState: VpnState.error, error: 'Connection timeout');
-            _connectTimeout = null;
-            _engine.disconnect().ignore();
-          }
-        });
-      }
+      _connectTimeout ??= Timer(const Duration(seconds: 30), () {
+        if (state.connectionState == VpnState.connecting) {
+          state = state.copyWith(
+              connectionState: VpnState.error, error: 'Connection timeout');
+          _connectTimeout = null;
+          _engine.disconnect().ignore();
+        }
+      });
     } else if (nativeState == VpnState.disconnecting) {
-      if (_disconnectTimeout == null) {
-        _disconnectTimeout = Timer(const Duration(seconds: 10), () {
-          if (state.connectionState == VpnState.disconnecting) {
-            state = VpnState2(connectionState: VpnState.disconnected);
-            _disconnectTimeout = null;
-          }
-        });
-      }
+      _disconnectTimeout ??= Timer(const Duration(seconds: 10), () {
+        if (state.connectionState == VpnState.disconnecting) {
+          state = VpnState2(connectionState: VpnState.disconnected);
+          _disconnectTimeout = null;
+        }
+      });
     }
 
     if (state.connectionState == nativeState) return;
@@ -190,7 +186,7 @@ class VpnNotifier extends Notifier<VpnState2> {
     final downloadSpeed = event['downloadSpeed'] as int? ?? 0;
 
     if (state.stats.uploadBytes == upload &&
-        state.stats.downloadBytes == download) return;
+        state.stats.downloadBytes == download) { return; }
 
     final duration = _connectedAt != null
         ? DateTime.now().difference(_connectedAt!)
@@ -427,7 +423,7 @@ class VpnNotifier extends Notifier<VpnState2> {
 
   Future<void> disconnect() async {
     if (state.connectionState == VpnState.disconnected ||
-        state.connectionState == VpnState.disconnecting) return;
+        state.connectionState == VpnState.disconnecting) { return; }
 
     // Update state synchronously
     state = state.copyWith(connectionState: VpnState.disconnecting);

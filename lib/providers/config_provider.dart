@@ -231,6 +231,16 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
     return (tagged, result);
   }
 
+  Future<void> renameSubscription(String id, String newName) async {
+    final current = state.maybeWhen(data: (d) => d, orElse: () => null) ?? const ConfigState();
+    final sub = current.subscriptions.firstWhere((s) => s.id == id);
+    final renamed = sub.copyWith(name: newName);
+    await storage.updateSubscription(renamed);
+    state = AsyncData(current.copyWith(
+      subscriptions: current.subscriptions.map((s) => s.id == id ? renamed : s).toList(),
+    ));
+  }
+
   Future<void> removeSubscription(String subId) async {
     final current = state.maybeWhen(data: (d) => d, orElse: () => null) ?? const ConfigState();
     await storage.removeSubscription(subId);
