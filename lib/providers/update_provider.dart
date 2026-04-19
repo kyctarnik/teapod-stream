@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import '../core/services/update_service.dart';
 import '../core/constants/app_constants.dart';
 import 'vpn_provider.dart';
+import 'settings_provider.dart';
 
 sealed class UpdateState {}
 
@@ -62,9 +63,15 @@ class UpdateNotifier extends Notifier<UpdateState> {
       final abi =
           await _channel.invokeMethod<String>('getAbi') ?? 'arm64-v8a';
       final vpn = ref.read(vpnProvider);
+      final settings = ref.read(settingsProvider).maybeWhen(
+            data: (d) => d,
+            orElse: () => null,
+          );
+      final channel = settings?.updateChannel ?? UpdateChannel.stable;
       final update = await _service.checkForUpdate(
         currentVersion,
         abi,
+        channel: channel,
         socksPort: vpn.isConnected ? vpn.activeSocksPort : null,
         socksUser: vpn.activeSocksUser,
         socksPassword: vpn.activeSocksPassword,

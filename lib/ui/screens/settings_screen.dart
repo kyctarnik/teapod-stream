@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../providers/update_provider.dart';
+import '../../core/services/update_service.dart' show UpdateChannel, UpdateInfo;
 import '../../core/models/dns_config.dart';
 import '../../core/services/settings_service.dart';
 import 'routing_screen.dart';
@@ -497,6 +498,8 @@ class _SettingsBodyState extends State<_SettingsBody> {
               url: 'https://github.com/Wendor/teapod-tun2socks',
             ),
             const _Divider(),
+            const _UpdateChannelTile(),
+            const _Divider(),
             const _UpdateTile(),
           ],
         ),
@@ -747,6 +750,56 @@ class _LinkRow extends StatelessWidget {
   }
 }
 
+class _UpdateChannelTile extends ConsumerWidget {
+  const _UpdateChannelTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider).maybeWhen(
+          data: (d) => d,
+          orElse: () => null,
+        );
+    if (settings == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Text(
+              'Канал обновлений',
+              style: TextStyle(color: AppColors.textPrimary),
+            ),
+          ),
+          SegmentedButton<UpdateChannel>(
+            segments: const [
+              ButtonSegment(
+                value: UpdateChannel.stable,
+                label: Text('Stable'),
+              ),
+              ButtonSegment(
+                value: UpdateChannel.beta,
+                label: Text('Beta'),
+              ),
+            ],
+            selected: {settings.updateChannel},
+            onSelectionChanged: (value) async {
+              final newChannel = value.first;
+              await ref
+                  .read(settingsProvider.notifier)
+                  .save(settings.copyWith(updateChannel: newChannel));
+              ref.read(updateProvider.notifier).checkForUpdate();
+            },
+            style: ButtonStyle(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _UpdateTile extends ConsumerWidget {
   const _UpdateTile();
 
@@ -778,22 +831,8 @@ class _UpdateTile extends ConsumerWidget {
           trailing:
               Icon(Icons.check_circle_outline, color: AppColors.connected),
         ),
-      UpdateAvailable(:final info, :final resumableBytes) => ListTile(
-          title: Text('Доступна v${info.version}',
-              style: const TextStyle(color: AppColors.textPrimary)),
-          subtitle: resumableBytes > 0
-              ? Text(
-                  'Продолжить (${(resumableBytes / 1024 / 1024).toStringAsFixed(1)} МБ)',
-                  style: const TextStyle(
-                      color: AppColors.textSecondary, fontSize: 12),
-                )
-              : null,
-          trailing: TextButton(
-            onPressed: () =>
-                ref.read(updateProvider.notifier).startDownload(info),
-            child: Text(resumableBytes > 0 ? 'Продолжить' : 'Скачать'),
-          ),
-        ),
+      UpdateAvailable(:final info, :final resumableBytes) =>
+        _UpdateAvailableTile(info: info, resumableBytes: resumableBytes),
       UpdateDownloading(:final info, :final downloaded, :final total) =>
         ListTile(
           title: Text('Скачивается v${info.version}',
@@ -849,6 +888,78 @@ class _UpdateTile extends ConsumerWidget {
           ),
         ),
     };
+  }
+}
+
+class _UpdateAvailableTile extends ConsumerWidget {
+  final UpdateInfo info;
+  final int resumableBytes;
+  const _UpdateAvailableTile(
+      {required this.info, required this.resumableBytes});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hasChangelog = info.changelog != null && info.changelog!.isNotEmpty;
+    if (!hasChangelog) {
+      return ListTile(
+        title: Text('Доступна v${info.version}',
+            style: const TextStyle(color: AppColors.textPrimary)),
+        subtitle: resumableBytes > 0
+            ? Text(
+                'Продолжить (${(resumableBytes / 1024 / 1024).toStringAsFixed(1)} МБ)',
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12),
+              )
+            : null,
+        trailing: TextButton(
+          onPressed: () =>
+              ref.read(updateProvider.notifier).startDownload(info),
+          child: Text(resumableBytes > 0 ? 'Продолжить' : 'Скачать'),
+        ),
+      );
+    }
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+        childrenPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        title: Text('Доступна v${info.version}',
+            style: const TextStyle(color: AppColors.textPrimary)),
+        subtitle: resumableBytes > 0
+            ? Text(
+                'Продолжить (${(resumableBytes / 1024 / 1024).toStringAsFixed(1)} МБ)',
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12),
+              )
+            : null,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton(
+              onPressed: () =>
+                  ref.read(updateProvider.notifier).startDownload(info),
+              child: Text(resumableBytes > 0 ? 'Продолжить' : 'Скачать'),
+            ),
+            const Icon(Icons.expand_more,
+                color: AppColors.textDisabled, size: 20),
+          ],
+        ),
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SelectableText(
+              info.changelog!,
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 12,
+                height: 1.5,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

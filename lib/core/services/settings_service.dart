@@ -5,6 +5,7 @@ import '../models/routing_settings.dart';
 import '../constants/app_constants.dart';
 import 'storage_secure_service.dart';
 import 'storage_migration_service.dart';
+import 'update_service.dart' show UpdateChannel;
 
 /// Режим работы VPN
 enum VpnMode {
@@ -33,6 +34,7 @@ class AppSettings {
   final bool showNotification;
   final bool killSwitchEnabled;
   final RoutingSettings routing;
+  final UpdateChannel updateChannel;
 
   const AppSettings({
     this.socksPort = AppConstants.defaultSocksPort,
@@ -55,6 +57,7 @@ class AppSettings {
     this.showNotification = true,
     this.killSwitchEnabled = false,
     this.routing = const RoutingSettings(),
+    this.updateChannel = UpdateChannel.stable,
   });
 
   AppSettings copyWith({
@@ -78,6 +81,7 @@ class AppSettings {
     bool? showNotification,
     bool? killSwitchEnabled,
     RoutingSettings? routing,
+    UpdateChannel? updateChannel,
   }) {
     return AppSettings(
       socksPort: socksPort ?? this.socksPort,
@@ -100,6 +104,7 @@ class AppSettings {
       showNotification: showNotification ?? this.showNotification,
       killSwitchEnabled: killSwitchEnabled ?? this.killSwitchEnabled,
       routing: routing ?? this.routing,
+      updateChannel: updateChannel ?? this.updateChannel,
     );
   }
 
@@ -134,6 +139,7 @@ class SettingsService {
   static const _routingGeoCodesKey = 'routing_geo_codes';
   static const _routingDomainEnabledKey = 'routing_domain_enabled';
   static const _routingDomainZonesKey = 'routing_domain_zones';
+  static const _updateChannelKey = 'update_channel';
 
   final _secure = StorageSecureService();
 
@@ -173,6 +179,10 @@ class SettingsService {
       showNotification: prefs.getBool(_showNotificationKey) ?? true,
       killSwitchEnabled: prefs.getBool(_killSwitchKey) ?? false,
       routing: _loadRouting(prefs),
+      updateChannel: UpdateChannel.values.firstWhere(
+        (e) => e.name == prefs.getString(_updateChannelKey),
+        orElse: () => UpdateChannel.stable,
+      ),
     );
   }
 
@@ -217,6 +227,7 @@ class SettingsService {
     await prefs.setStringList(_routingGeoCodesKey, settings.routing.geoCodes);
     await prefs.setBool(_routingDomainEnabledKey, settings.routing.domainEnabled);
     await prefs.setStringList(_routingDomainZonesKey, settings.routing.domainZones);
+    await prefs.setString(_updateChannelKey, settings.updateChannel.name);
     // SOCKS credentials go to encrypted storage
     await _secure.writeSocksCredentials(settings.socksUser, settings.socksPassword);
   }
