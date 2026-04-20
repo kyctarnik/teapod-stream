@@ -83,6 +83,31 @@ class XrayVpnService : VpnService() {
             "downloadSpeed" to lastDownloadSpeed,
         )
 
+        @JvmStatic fun showIntermediateNotification(context: android.content.Context, isConnecting: Boolean) {
+            try {
+                val manager = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                ensureNotificationChannel(manager)
+                val text = if (isConnecting) "Подключение…" else "Отключение…"
+                val notification = androidx.core.app.NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+                    .setContentTitle("TeapodStream VPN")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setOngoing(true)
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+                    .setProgress(0, 0, true)
+                    .build()
+                manager.notify(NOTIFICATION_ID, notification)
+            } catch (_: Exception) { }
+        }
+
+        private fun ensureNotificationChannel(manager: android.app.NotificationManager) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(
+                    android.app.NotificationChannel(NOTIFICATION_CHANNEL_ID, "VPN статус", android.app.NotificationManager.IMPORTANCE_LOW)
+                )
+            }
+        }
+
         fun prepareBinaries(context: android.content.Context): Boolean {
             val filesDir = context.filesDir
             val assets = context.assets
@@ -678,11 +703,11 @@ class XrayVpnService : VpnService() {
                 tunInterface = null
             }
 
-            // On explicit disconnect, remove the config file so credentials
-            // don't persist on disk between user sessions.
-            if (explicit && !reconnecting) {
-                try { File(filesDir, "xray_config.json").delete() } catch (_: Exception) {}
-            }
+            // Keep xray_config.json for Quick Settings tile reconnect.
+            // File is in process-private filesDir, not accessible to other apps.
+            // if (explicit && !reconnecting) {
+            //     try { File(filesDir, "xray_config.json").delete() } catch (_: Exception) {}
+            // }
         } finally {
             // Don't overwrite "connecting" state when doing internal reconnect
             if (!reconnecting) {
@@ -997,10 +1022,9 @@ class XrayVpnService : VpnService() {
 
     private fun updateNotification(uploadSpeed: Long, downloadSpeed: Long) {
         if (!showNotification) return
-        try {
-            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, buildConnectedNotification(uploadSpeed, downloadSpeed))
-        } catch (_: Exception) {}
+
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, buildConnectedNotification(uploadSpeed, downloadSpeed))
     }
 
     private fun log(level: String, message: String) {

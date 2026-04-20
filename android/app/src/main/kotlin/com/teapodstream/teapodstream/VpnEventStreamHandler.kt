@@ -1,10 +1,7 @@
 package com.teapodstream.teapodstream
 
-import android.content.ComponentName
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.service.quicksettings.TileService
 import io.flutter.plugin.common.EventChannel
 
 /**
@@ -50,8 +47,13 @@ object VpnEventStreamHandler : EventChannel.StreamHandler {
 
     fun sendStateEvent(state: String) {
         sendEvent(mapOf("type" to "state", "value" to state))
-        // Обновляем Quick Settings плитку при изменении состояния VPN
-        requestTileUpdate()
+        // Обновляем плитку и уведомление при изменении состояния
+        appContext?.let { ctx ->
+            VpnTileService.updateTile(ctx)
+            if (state == "connecting" || state == "disconnecting") {
+                XrayVpnService.showIntermediateNotification(ctx, state == "connecting")
+            }
+        }
     }
 
     fun sendConnectedEvent(socksPort: Int, socksUser: String, socksPassword: String) {
@@ -62,6 +64,7 @@ object VpnEventStreamHandler : EventChannel.StreamHandler {
             "socksUser" to socksUser,
             "socksPassword" to socksPassword,
         ))
+        appContext?.let { VpnTileService.updateTile(it) }
     }
 
     fun sendLogEvent(level: String, message: String) {
@@ -85,18 +88,4 @@ object VpnEventStreamHandler : EventChannel.StreamHandler {
         )
     }
 
-    /**
-     * Запрашивает обновление Quick Settings плитки.
-     */
-    fun requestTileUpdate() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val ctx = appContext ?: return
-            try {
-                TileService.requestListeningState(
-                    ctx,
-                    ComponentName(ctx, VpnTileService::class.java)
-                )
-            } catch (_: Exception) { }
-        }
     }
-}
