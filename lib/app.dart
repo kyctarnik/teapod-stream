@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'ui/theme/app_theme.dart';
 import 'ui/screens/home_screen.dart';
@@ -84,21 +83,12 @@ class _AppShellState extends ConsumerState<_AppShell> with WidgetsBindingObserve
   }
 
   Future<void> _tryAutoConnect() async {
-    // Give providers time to initialize
-    await Future.delayed(const Duration(milliseconds: 300));
-    if (!mounted) return;
+    // Wait for providers to finish loading (handles variable-length async init)
+    final settings = await ref.read(settingsProvider.future);
+    if (!mounted || !settings.autoConnect) return;
 
-    final settings = ref.read(settingsProvider).maybeWhen(
-      data: (d) => d,
-      orElse: () => null,
-    );
-    if (settings == null || !settings.autoConnect) return;
-
-    final configState = ref.read(configProvider).maybeWhen(
-      data: (d) => d,
-      orElse: () => null,
-    );
-    if (configState?.activeConfig == null) return;
+    final configState = await ref.read(configProvider.future);
+    if (!mounted || configState.activeConfig == null) return;
 
     final vpnState = ref.read(vpnProvider);
     if (!vpnState.isConnected && !vpnState.isConnecting) {

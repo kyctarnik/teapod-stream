@@ -16,11 +16,17 @@ class VpnState2 {
   final VpnState connectionState;
   final VpnStats stats;
   final String? error;
+  final int activeSocksPort;
+  final String activeSocksUser;
+  final String activeSocksPassword;
 
   const VpnState2({
     this.connectionState = VpnState.disconnected,
     this.stats = const VpnStats(),
     this.error,
+    this.activeSocksPort = 0,
+    this.activeSocksUser = '',
+    this.activeSocksPassword = '',
   });
 
   bool get isConnected => connectionState == VpnState.connected;
@@ -32,11 +38,17 @@ class VpnState2 {
     VpnState? connectionState,
     VpnStats? stats,
     String? error,
+    int? activeSocksPort,
+    String? activeSocksUser,
+    String? activeSocksPassword,
   }) {
     return VpnState2(
       connectionState: connectionState ?? this.connectionState,
       stats: stats ?? this.stats,
       error: error,
+      activeSocksPort: activeSocksPort ?? this.activeSocksPort,
+      activeSocksUser: activeSocksUser ?? this.activeSocksUser,
+      activeSocksPassword: activeSocksPassword ?? this.activeSocksPassword,
     );
   }
 }
@@ -50,6 +62,7 @@ class VpnNotifier extends Notifier<VpnState2> {
   Timer? _connectTimeout;
   Timer? _disconnectTimeout;
   DateTime? _connectedAt;
+
 
   @override
   VpnState2 build() {
@@ -82,6 +95,18 @@ class VpnNotifier extends Notifier<VpnState2> {
     switch (type) {
       case 'state':
         final newState = _parseState(event['value'] as String?);
+        if (newState == VpnState.connected) {
+          final port = event['socksPort'] as int?;
+          if (port != null && port > 0) {
+            final user = event['socksUser'] as String? ?? '';
+            final pass = event['socksPassword'] as String? ?? '';
+            state = state.copyWith(
+              activeSocksPort: port,
+              activeSocksUser: user,
+              activeSocksPassword: pass,
+            );
+          }
+        }
         _onNativeState(newState);
       case 'log':
         final level = event['level'] as String? ?? 'info';
@@ -122,25 +147,21 @@ class VpnNotifier extends Notifier<VpnState2> {
       _disconnectTimeout?.cancel();
       _disconnectTimeout = null;
     } else if (nativeState == VpnState.connecting) {
-      if (_connectTimeout == null) {
-        _connectTimeout = Timer(const Duration(seconds: 30), () {
-          if (state.connectionState == VpnState.connecting) {
-            state = state.copyWith(
-                connectionState: VpnState.error, error: 'Connection timeout');
-            _connectTimeout = null;
-            _engine.disconnect().ignore();
-          }
-        });
-      }
+      _connectTimeout ??= Timer(const Duration(seconds: 45), () {
+        if (state.connectionState == VpnState.connecting) {
+          state = state.copyWith(
+              connectionState: VpnState.error, error: 'Connection timeout');
+          _connectTimeout = null;
+          _engine.disconnect().ignore();
+        }
+      });
     } else if (nativeState == VpnState.disconnecting) {
-      if (_disconnectTimeout == null) {
-        _disconnectTimeout = Timer(const Duration(seconds: 10), () {
-          if (state.connectionState == VpnState.disconnecting) {
-            state = VpnState2(connectionState: VpnState.disconnected);
-            _disconnectTimeout = null;
-          }
-        });
-      }
+      _disconnectTimeout ??= Timer(const Duration(seconds: 10), () {
+        if (state.connectionState == VpnState.disconnecting) {
+          state = VpnState2(connectionState: VpnState.disconnected);
+          _disconnectTimeout = null;
+        }
+      });
     }
 
     if (state.connectionState == nativeState) return;
@@ -165,7 +186,7 @@ class VpnNotifier extends Notifier<VpnState2> {
     final downloadSpeed = event['downloadSpeed'] as int? ?? 0;
 
     if (state.stats.uploadBytes == upload &&
-        state.stats.downloadBytes == download) return;
+        state.stats.downloadBytes == download) { return; }
 
     final duration = _connectedAt != null
         ? DateTime.now().difference(_connectedAt!)
@@ -188,9 +209,9 @@ class VpnNotifier extends Notifier<VpnState2> {
     // Update state synchronously — button turns yellow in the same frame as tap
     state = state.copyWith(connectionState: VpnState.connecting, error: null);
 
-    // Safety timeout — if native never confirms, force error after 30s
+    // Safety timeout — if native never confirms, force error after 45s
     _connectTimeout?.cancel();
-    _connectTimeout = Timer(const Duration(seconds: 30), () {
+    _connectTimeout = Timer(const Duration(seconds: 45), () {
       if (state.connectionState == VpnState.connecting) {
         state = state.copyWith(
             connectionState: VpnState.error, error: 'Connection timeout');
@@ -250,6 +271,13 @@ class VpnNotifier extends Notifier<VpnState2> {
       vpnMode: settings.vpnMode,
       proxyOnly: settings.proxyOnly,
       showNotification: settings.showNotification,
+      killSwitch: settings.killSwitchEnabled,
+      routing: settings.routing,
+    );
+    state = state.copyWith(
+      activeSocksPort: actualSocksPort,
+      activeSocksUser: socksCredentials.user,
+      activeSocksPassword: socksCredentials.password,
     );
 
     try {
@@ -267,7 +295,7 @@ class VpnNotifier extends Notifier<VpnState2> {
 
   Future<void> disconnect() async {
     if (state.connectionState == VpnState.disconnected ||
-        state.connectionState == VpnState.disconnecting) return;
+        state.connectionState == VpnState.disconnecting) { return; }
 
     // Update state synchronously
     state = state.copyWith(connectionState: VpnState.disconnecting);
@@ -313,6 +341,31 @@ class VpnNotifier extends Notifier<VpnState2> {
       await disconnect();
     } else {
       await connect();
+    }
+  }
+
+  Future<void> reconnectWithNewConfig() async {
+    if (state.isConnected || state.isConnecting) {
+      await disconnect();
+      // _disconnectTimeout is 10s; wait up to 12s so the forced-disconnect fires first.
+      for (int i = 0; i < 120; i++) {
+        if (!state.isBusy && !state.isConnected) break;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+    await connect();
+  }
+
+  Future<void> pingAllConfigs() async {
+    final configState = ref.read(configProvider).maybeWhen(data: (d) => d, orElse: () => null);
+    if (configState == null) return;
+    // Ping in parallel, then update state sequentially to avoid race condition
+    final pinged = await Future.wait(configState.configs.map((config) async {
+      final ms = await _engine.pingConfig(config);
+      return config.copyWith(latencyMs: ms);
+    }));
+    for (final updated in pinged) {
+      await ref.read(configProvider.notifier).updateConfig(updated);
     }
   }
 

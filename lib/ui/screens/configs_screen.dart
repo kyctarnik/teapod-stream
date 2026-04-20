@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../core/models/vpn_config.dart';
 import '../../core/services/config_storage_service.dart';
 import '../../core/services/subscription_service.dart';
@@ -21,6 +23,7 @@ class ConfigsScreen extends ConsumerStatefulWidget {
 
 class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
   final Set<String> _expandedSubs = {};
+  bool _isPinging = false;
 
   @override
   Widget build(BuildContext context) {
@@ -31,6 +34,24 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
       appBar: AppBar(
         title: const Text('Конфигурации'),
         actions: [
+          if (_isPinging)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.network_ping_rounded),
+              tooltip: 'Проверить пинг',
+              onPressed: configStateAsync.maybeWhen(
+                data: (s) => s.configs.isNotEmpty ? () => _pingAll(s.configs) : null,
+                orElse: () => null,
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.add_rounded),
             onPressed: () => _openAddConfig(context),
@@ -90,6 +111,20 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
 
   void _selectConfig(WidgetRef ref, VpnConfig config) {
     ref.read(configProvider.notifier).setActiveConfig(config.id);
+    final vpnState = ref.read(vpnProvider);
+    if (vpnState.isConnected || vpnState.isBusy) {
+      ref.read(vpnProvider.notifier).reconnectWithNewConfig();
+    }
+  }
+
+  Future<void> _pingAll(List<VpnConfig> configs) async {
+    if (_isPinging) return;
+    setState(() => _isPinging = true);
+    try {
+      await ref.read(vpnProvider.notifier).pingAllConfigs();
+    } finally {
+      if (mounted) setState(() => _isPinging = false);
+    }
   }
 
   Future<void> _showConfigMenu(
@@ -117,6 +152,7 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
     );
 
     if (result == null) return;
+    if (!context.mounted) return;
     switch (result) {
       case 'rename':
         await _renameConfig(context, ref, config);
@@ -124,8 +160,12 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
       case 'edit':
         await _editConfig(context, ref, config);
         break;
-      case 'copy':
       case 'share':
+        if (config.rawUri != null) {
+          await Share.share(config.rawUri!);
+        }
+        break;
+      case 'copy':
         if (config.rawUri != null) {
           await Clipboard.setData(ClipboardData(text: config.rawUri!));
           if (context.mounted) {
@@ -366,16 +406,7 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
       ),
     );
     if (ok == true && controller.text.trim().isNotEmpty) {
-      final updated = sub.copyWith(name: controller.text.trim());
-      await ConfigNotifier.storage.updateSubscription(updated);
-      final current = ref.read(configProvider).maybeWhen(data: (d) => d, orElse: () => null);
-      if (current != null) {
-        ref.read(configProvider.notifier).state = AsyncData(
-          current.copyWith(
-            subscriptions: current.subscriptions.map((s) => s.id == sub.id ? updated : s).toList(),
-          ),
-        );
-      }
+      await ref.read(configProvider.notifier).renameSubscription(sub.id, controller.text.trim());
     }
   }
 
@@ -511,8 +542,42 @@ class _SubscriptionGroup extends StatelessWidget {
     return '${diff.inDays} д назад';
   }
 
+  String? get _expireLabel {
+    final exp = subscription.expireAt;
+    if (exp == null) return null;
+    final days = exp.difference(DateTime.now()).inDays;
+    if (days < 0) return 'Истёк';
+    if (days == 0) return 'Истекает сегодня';
+    return 'Ещё $days д';
+  }
+
+  Color get _expireColor {
+    final exp = subscription.expireAt;
+    if (exp == null) return AppColors.textSecondary;
+    final days = exp.difference(DateTime.now()).inDays;
+    if (days < 0) return AppColors.error;
+    if (days <= 7) return AppColors.error;
+    if (days <= 14) return AppColors.connecting;
+    return AppColors.connected;
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} ГБ';
+    }
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(0)} МБ';
+    }
+    return '${(bytes / 1024).toStringAsFixed(0)} КБ';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final expireLabel = _expireLabel;
+    final hasTraffic = subscription.totalBytes != null;
+    final announce = subscription.announce;
+    final announceUrl = subscription.announceUrl;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -527,41 +592,69 @@ class _SubscriptionGroup extends StatelessWidget {
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: AppColors.border),
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
-                  isExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
-                  color: AppColors.textSecondary,
-                  size: 20,
-                ),
-                const SizedBox(width: 8),
-                const Icon(Icons.rss_feed_rounded, color: AppColors.primary, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        subscription.name,
-                        style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
+                Row(
+                  children: [
+                    Icon(
+                      isExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                      color: AppColors.textSecondary,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    const Icon(Icons.rss_feed_rounded, color: AppColors.primary, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            subscription.name,
+                            style: const TextStyle(
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
+                          ),
+                          Text(
+                            '${configs.length} конф. • $_lastRefresh',
+                            style: const TextStyle(
+                              color: AppColors.textSecondary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
                       ),
-                      Text(
-                        '${configs.length} конф. • $_lastRefresh',
-                        style: const TextStyle(
-                          color: AppColors.textSecondary,
-                          fontSize: 11,
-                        ),
-                      ),
+                    ),
+                    if (expireLabel != null) ...[
+                      const SizedBox(width: 6),
+                      _ExpiryBadge(label: expireLabel, color: _expireColor),
                     ],
-                  ),
+                    const SizedBox(width: 4),
+                    _SubAction(Icons.refresh_rounded, onRefresh),
+                    const SizedBox(width: 4),
+                    _SubAction(Icons.more_vert_rounded, () => _showSubSubMenu(context)),
+                  ],
                 ),
-                _SubAction(Icons.refresh_rounded, onRefresh),
-                const SizedBox(width: 4),
-                _SubAction(Icons.more_vert_rounded, () => _showSubSubMenu(context)),
+                // Traffic bar
+                if (hasTraffic) ...[
+                  const SizedBox(height: 8),
+                  _TrafficBar(
+                    upload: subscription.uploadBytes ?? 0,
+                    download: subscription.downloadBytes ?? 0,
+                    total: subscription.totalBytes!,
+                    formatBytes: _formatBytes,
+                  ),
+                ],
+                // Announce message + link
+                if (announce != null && announce.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _AnnounceBanner(
+                    message: announce,
+                    url: announceUrl,
+                  ),
+                ],
               ],
             ),
           ),
@@ -716,6 +809,131 @@ class _MenuRow extends StatelessWidget {
         const SizedBox(width: 12),
         Text(label, style: TextStyle(color: color ?? AppColors.textPrimary)),
       ],
+    );
+  }
+}
+
+class _ExpiryBadge extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _ExpiryBadge({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 0.5),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+class _TrafficBar extends StatelessWidget {
+  final int upload;
+  final int download;
+  final int total;
+  final String Function(int) formatBytes;
+  const _TrafficBar({
+    required this.upload,
+    required this.download,
+    required this.total,
+    required this.formatBytes,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final used = upload + download;
+    final ratio = total > 0 ? (used / total).clamp(0.0, 1.0) : 0.0;
+    final barColor = ratio > 0.9
+        ? AppColors.error
+        : ratio > 0.75
+            ? AppColors.connecting
+            : AppColors.primary;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Трафик: ${formatBytes(used)} / ${formatBytes(total)}',
+              style: const TextStyle(color: AppColors.textSecondary, fontSize: 11),
+            ),
+            Text(
+              '${(ratio * 100).toStringAsFixed(0)}%',
+              style: TextStyle(color: barColor, fontSize: 11, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: LinearProgressIndicator(
+            value: ratio,
+            minHeight: 4,
+            backgroundColor: AppColors.surfaceHighlight,
+            valueColor: AlwaysStoppedAnimation<Color>(barColor),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AnnounceBanner extends StatelessWidget {
+  final String message;
+  final String? url;
+  const _AnnounceBanner({required this.message, this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceHighlight,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.info_outline_rounded, size: 14, color: AppColors.textSecondary),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+            ),
+          ),
+          if (url != null) ...[
+            const SizedBox(width: 6),
+            GestureDetector(
+              onTap: () {
+                final uri = Uri.tryParse(url!);
+                if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: AppColors.primary.withValues(alpha: 0.4), width: 0.5),
+                ),
+                child: const Text(
+                  'Продлить',
+                  style: TextStyle(color: AppColors.primary, fontSize: 11, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

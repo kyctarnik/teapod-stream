@@ -12,13 +12,21 @@ class VlessParser {
     return null;
   }
 
+  static String _decodeName(String raw) {
+    try {
+      return Uri.decodeComponent(raw);
+    } catch (_) {
+      return raw;
+    }
+  }
+
   // vless://uuid@host:port?params#name
   static VpnConfig? _parseVless(String uri) {
     try {
       final withoutScheme = uri.substring('vless://'.length);
       final hashIdx = withoutScheme.indexOf('#');
       final name = hashIdx >= 0
-          ? Uri.decodeComponent(withoutScheme.substring(hashIdx + 1))
+          ? _decodeName(withoutScheme.substring(hashIdx + 1))
           : 'VLESS Server';
       final main =
           hashIdx >= 0 ? withoutScheme.substring(0, hashIdx) : withoutScheme;
@@ -60,6 +68,7 @@ class VlessParser {
         postQuantumKey: params['pqv'],
         flow: params['flow'],
         encryption: params['encryption'] ?? 'none',
+        xhttpMode: params['mode'],
         createdAt: DateTime.now(),
         rawUri: uri,
       );
@@ -96,6 +105,7 @@ class VlessParser {
         wsHost: json['host'] as String?,
         grpcServiceName: json['path'] as String?,
         alterId: json['aid']?.toString() ?? '0',
+        xhttpMode: json['mode'] as String?,
         createdAt: DateTime.now(),
         rawUri: uri,
       );
@@ -110,7 +120,7 @@ class VlessParser {
       final withoutScheme = uri.substring('trojan://'.length);
       final hashIdx = withoutScheme.indexOf('#');
       final name = hashIdx >= 0
-          ? Uri.decodeComponent(withoutScheme.substring(hashIdx + 1))
+          ? _decodeName(withoutScheme.substring(hashIdx + 1))
           : 'Trojan Server';
       final main =
           hashIdx >= 0 ? withoutScheme.substring(0, hashIdx) : withoutScheme;
@@ -141,6 +151,7 @@ class VlessParser {
         wsPath: params['path'],
         wsHost: params['host'],
         fingerprint: params['fp'],
+        xhttpMode: params['mode'],
         createdAt: DateTime.now(),
         rawUri: uri,
       );
@@ -155,7 +166,7 @@ class VlessParser {
       final withoutScheme = uri.substring('ss://'.length);
       final hashIdx = withoutScheme.indexOf('#');
       final name = hashIdx >= 0
-          ? Uri.decodeComponent(withoutScheme.substring(hashIdx + 1))
+          ? _decodeName(withoutScheme.substring(hashIdx + 1))
           : 'Shadowsocks Server';
       final main =
           hashIdx >= 0 ? withoutScheme.substring(0, hashIdx) : withoutScheme;
@@ -251,7 +262,7 @@ class VlessParser {
       final withoutScheme = uri.substring(scheme.length);
       final hashIdx = withoutScheme.indexOf('#');
       final name = hashIdx >= 0
-          ? Uri.decodeComponent(withoutScheme.substring(hashIdx + 1))
+          ? _decodeName(withoutScheme.substring(hashIdx + 1))
           : 'Hysteria2 Server';
       final main =
           hashIdx >= 0 ? withoutScheme.substring(0, hashIdx) : withoutScheme;

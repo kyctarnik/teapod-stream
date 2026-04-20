@@ -1,7 +1,11 @@
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_log_entry.dart';
 import '../models/dns_config.dart';
+import '../models/routing_settings.dart';
 import '../constants/app_constants.dart';
+import 'storage_secure_service.dart';
+import 'storage_migration_service.dart';
+import 'update_service.dart' show UpdateChannel;
 
 /// Режим работы VPN
 enum VpnMode {
@@ -28,13 +32,16 @@ class AppSettings {
   final String socksPassword;
   final bool proxyOnly;
   final bool showNotification;
+  final bool killSwitchEnabled;
+  final RoutingSettings routing;
+  final UpdateChannel updateChannel;
 
   const AppSettings({
     this.socksPort = AppConstants.defaultSocksPort,
     this.logLevel = LogLevel.info,
     this.excludedPackages = const {},
     this.includedPackages = const {},
-    this.vpnMode = VpnMode.allExcept,
+    this.vpnMode = VpnMode.onlySelected,
     this.splitTunnelingEnabled = false,
     this.randomPort = true,
     this.autoConnect = false,
@@ -48,6 +55,9 @@ class AppSettings {
     this.socksPassword = '',
     this.proxyOnly = false,
     this.showNotification = true,
+    this.killSwitchEnabled = false,
+    this.routing = const RoutingSettings(),
+    this.updateChannel = UpdateChannel.stable,
   });
 
   AppSettings copyWith({
@@ -69,6 +79,9 @@ class AppSettings {
     String? socksPassword,
     bool? proxyOnly,
     bool? showNotification,
+    bool? killSwitchEnabled,
+    RoutingSettings? routing,
+    UpdateChannel? updateChannel,
   }) {
     return AppSettings(
       socksPort: socksPort ?? this.socksPort,
@@ -89,6 +102,9 @@ class AppSettings {
       socksPassword: socksPassword ?? this.socksPassword,
       proxyOnly: proxyOnly ?? this.proxyOnly,
       showNotification: showNotification ?? this.showNotification,
+      killSwitchEnabled: killSwitchEnabled ?? this.killSwitchEnabled,
+      routing: routing ?? this.routing,
+      updateChannel: updateChannel ?? this.updateChannel,
     );
   }
 
@@ -112,15 +128,28 @@ class SettingsService {
   static const _customDnsTypeKey = 'custom_dns_type';
   static const _enableUdpKey = 'enable_udp';
   static const _randomCredentialsKey = 'random_credentials';
-  static const _socksUserKey = 'socks_user';
-  static const _socksPasswordKey = 'socks_password';
   static const _proxyOnlyKey = 'proxy_only';
   static const _showNotificationKey = 'show_notification';
   static const _vpnModeKey = 'vpn_mode';
   static const _includedPackagesKey = 'included_packages';
+  static const _killSwitchKey = 'kill_switch';
+  static const _routingDirectionKey = 'routing_direction';
+  static const _routingBypassLocalKey = 'routing_bypass_local';
+  static const _routingGeoEnabledKey = 'routing_geo_enabled';
+  static const _routingGeoCodesKey = 'routing_geo_codes';
+  static const _routingDomainEnabledKey = 'routing_domain_enabled';
+  static const _routingDomainZonesKey = 'routing_domain_zones';
+  static const _routingGeositeEnabledKey = 'routing_geosite_enabled';
+  static const _routingGeositeCodesKey = 'routing_geosite_codes';
+  static const _routingAdBlockEnabledKey = 'routing_adblock_enabled';
+  static const _updateChannelKey = 'update_channel';
+
+  final _secure = StorageSecureService();
 
   Future<AppSettings> load() async {
+    await StorageMigrationService.runIfNeeded();
     final prefs = await SharedPreferences.getInstance();
+    final creds = await _secure.readSocksCredentials();
     final excluded = (prefs.getStringList(_excludedPackagesKey) ?? []).toSet();
     final included = (prefs.getStringList(_includedPackagesKey) ?? []).toSet();
     return AppSettings(
@@ -133,7 +162,7 @@ class SettingsService {
       includedPackages: included,
       vpnMode: VpnMode.values.firstWhere(
         (e) => e.name == prefs.getString(_vpnModeKey),
-        orElse: () => VpnMode.allExcept,
+        orElse: () => VpnMode.onlySelected,
       ),
       splitTunnelingEnabled: prefs.getBool(_splitTunnelingKey) ?? false,
       randomPort: prefs.getBool(_randomPortKey) ?? true,
@@ -147,10 +176,33 @@ class SettingsService {
       customDnsType: prefs.getString(_customDnsTypeKey) ?? 'udp',
       enableUdp: prefs.getBool(_enableUdpKey) ?? true,
       randomCredentials: prefs.getBool(_randomCredentialsKey) ?? true,
-      socksUser: prefs.getString(_socksUserKey) ?? '',
-      socksPassword: prefs.getString(_socksPasswordKey) ?? '',
+      socksUser: creds.user,
+      socksPassword: creds.password,
       proxyOnly: prefs.getBool(_proxyOnlyKey) ?? false,
       showNotification: prefs.getBool(_showNotificationKey) ?? true,
+      killSwitchEnabled: prefs.getBool(_killSwitchKey) ?? false,
+      routing: _loadRouting(prefs),
+      updateChannel: UpdateChannel.values.firstWhere(
+        (e) => e.name == prefs.getString(_updateChannelKey),
+        orElse: () => UpdateChannel.stable,
+      ),
+    );
+  }
+
+  static RoutingSettings _loadRouting(SharedPreferences prefs) {
+    return RoutingSettings(
+      direction: RoutingDirection.values.firstWhere(
+        (e) => e.name == prefs.getString(_routingDirectionKey),
+        orElse: () => RoutingDirection.global,
+      ),
+      bypassLocal: prefs.getBool(_routingBypassLocalKey) ?? false,
+      geoEnabled: prefs.getBool(_routingGeoEnabledKey) ?? false,
+      geoCodes: prefs.getStringList(_routingGeoCodesKey) ?? [],
+      domainEnabled: prefs.getBool(_routingDomainEnabledKey) ?? false,
+      domainZones: prefs.getStringList(_routingDomainZonesKey) ?? [],
+      geositeEnabled: prefs.getBool(_routingGeositeEnabledKey) ?? false,
+      geositeCodes: prefs.getStringList(_routingGeositeCodesKey) ?? [],
+      adBlockEnabled: prefs.getBool(_routingAdBlockEnabledKey) ?? false,
     );
   }
 
@@ -172,9 +224,20 @@ class SettingsService {
     await prefs.setString(_customDnsTypeKey, settings.customDnsType);
     await prefs.setBool(_enableUdpKey, settings.enableUdp);
     await prefs.setBool(_randomCredentialsKey, settings.randomCredentials);
-    await prefs.setString(_socksUserKey, settings.socksUser);
-    await prefs.setString(_socksPasswordKey, settings.socksPassword);
     await prefs.setBool(_proxyOnlyKey, settings.proxyOnly);
     await prefs.setBool(_showNotificationKey, settings.showNotification);
+    await prefs.setBool(_killSwitchKey, settings.killSwitchEnabled);
+    await prefs.setString(_routingDirectionKey, settings.routing.direction.name);
+    await prefs.setBool(_routingBypassLocalKey, settings.routing.bypassLocal);
+    await prefs.setBool(_routingGeoEnabledKey, settings.routing.geoEnabled);
+    await prefs.setStringList(_routingGeoCodesKey, settings.routing.geoCodes);
+    await prefs.setBool(_routingDomainEnabledKey, settings.routing.domainEnabled);
+    await prefs.setStringList(_routingDomainZonesKey, settings.routing.domainZones);
+    await prefs.setBool(_routingGeositeEnabledKey, settings.routing.geositeEnabled);
+    await prefs.setStringList(_routingGeositeCodesKey, settings.routing.geositeCodes);
+    await prefs.setBool(_routingAdBlockEnabledKey, settings.routing.adBlockEnabled);
+    await prefs.setString(_updateChannelKey, settings.updateChannel.name);
+    // SOCKS credentials go to encrypted storage
+    await _secure.writeSocksCredentials(settings.socksUser, settings.socksPassword);
   }
 }

@@ -2,10 +2,12 @@ import 'dart:convert';
 import '../../core/interfaces/vpn_engine.dart';
 import '../../core/models/vpn_config.dart';
 import '../../core/models/dns_config.dart';
+import '../../core/models/routing_settings.dart';
 
 class XrayConfigBuilder {
   static Map<String, dynamic> build(VpnConfig config, VpnEngineOptions options) {
     final dnsBlock = _buildDnsBlock(options);
+    final routing = options.routing;
 
     return {
       'log': {'loglevel': options.logLevel.name},
@@ -27,9 +29,17 @@ class XrayConfigBuilder {
           'sniffing': {
             'enabled': true,
             'destOverride': ['http', 'tls', 'quic'],
-            'routeOnly': false,
+            // routeOnly: true preserves sniffed domain/IP for routing — without it xray
+            // re-resolves the domain via DNS before applying rules, which adds latency and
+            // may fail for CDN domains or when DNS is unreliable during network transitions.
+            'routeOnly': (routing.isActive || routing.adBlockEnabled) && (
+              (routing.geoEnabled && routing.geoCodes.isNotEmpty) ||
+              (routing.domainEnabled && routing.domainZones.isNotEmpty) ||
+              (routing.geositeEnabled && routing.geositeCodes.isNotEmpty) ||
+              routing.adBlockEnabled
+            ),
           },
-        }
+        },
       ],
       'outbounds': [
         _buildOutbound(config),
@@ -60,10 +70,13 @@ class XrayConfigBuilder {
               'outboundTag': 'direct',
             },
           ],
+          ..._buildGeoRules(routing),
           {
             'type': 'field',
             'inboundTag': ['socks-in'],
-            'outboundTag': 'proxy',
+            'outboundTag': routing.direction == RoutingDirection.onlySelected
+                ? 'direct'
+                : 'proxy',
           }
         ],
       },
@@ -82,6 +95,58 @@ class XrayConfigBuilder {
         }
       },
     };
+  }
+
+  static List<Map<String, dynamic>> _buildGeoRules(RoutingSettings routing) {
+    if (!routing.isActive) return [];
+
+    final rules = <Map<String, dynamic>>[];
+
+    // Private IPs always bypass regardless of direction
+    if (routing.bypassLocal) {
+      rules.add({'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'direct'});
+    }
+
+    if (routing.adBlockEnabled) {
+      rules.add({
+        'type': 'field',
+        'domain': ['geosite:category-ads-all'],
+        'outboundTag': 'block',
+      });
+    }
+
+    if (!routing.isActive) return rules;
+
+    if (!routing.geoEnabled && !routing.domainEnabled && !routing.geositeEnabled) return rules;
+
+    final selectedOut =
+        routing.direction == RoutingDirection.bypass ? 'direct' : 'proxy';
+
+    if (routing.domainEnabled && routing.domainZones.isNotEmpty) {
+      rules.add({
+        'type': 'field',
+        'domain': routing.domainZones.map((z) => 'domain:$z').toList(),
+        'outboundTag': selectedOut,
+      });
+    }
+
+    if (routing.geositeEnabled && routing.geositeCodes.isNotEmpty) {
+      rules.add({
+        'type': 'field',
+        'domain': routing.geositeCodes.map((c) => 'geosite:$c').toList(),
+        'outboundTag': selectedOut,
+      });
+    }
+
+    if (routing.geoEnabled && routing.geoCodes.isNotEmpty) {
+      rules.add({
+        'type': 'field',
+        'ip': routing.geoCodes.map((c) => 'geoip:${c.toLowerCase()}').toList(),
+        'outboundTag': selectedOut,
+      });
+    }
+
+    return rules;
   }
 
   static Map<String, dynamic> _buildDnsBlock(VpnEngineOptions options) {
@@ -251,6 +316,8 @@ class XrayConfigBuilder {
           'path': config.wsPath ?? '/',
           if (config.wsHost != null && config.wsHost!.isNotEmpty)
             'host': config.wsHost,
+          if (config.xhttpMode != null && config.xhttpMode!.isNotEmpty)
+            'mode': config.xhttpMode,
         },
       if (config.transport == VpnTransport.splithttp)
         'splithttpSettings': {

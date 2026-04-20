@@ -20,7 +20,7 @@ final installedAppsProvider =
       return AppInfo(
         packageName: pkg,
         appName: map['appName'] as String? ?? pkg,
-        iconBase64: map['icon'] as String?,
+        isSystem: map['isSystem'] as bool? ?? false,
         isExcluded: excluded.contains(pkg),
       );
     }).toList()

@@ -2,6 +2,18 @@
 
 VPN-клиент для Android с поддержкой протокола Xray и интерфейсом TUN.
 
+> [!WARNING]
+> Во избежание недопониманий, коротко о сути проекта и планах
+>
+> Teapod Stream — это личный некоммерческий проект, главная цель которого — простота. Это не комбайн для гиков с сотней настроек, а просто удобный «человеческий» UI для VPN.
+>
+> Развитие клиента происходит по мере необходимости: код допиливается, когда автор сам сталкивается с какими-то багами или нюансами.
+> - Приоритеты: проект на стадии набора базового функционала, поэтому минорные баги правятся в последнюю очередь.
+> - Releases: здесь лежат стабильные сборки, которые автор уже обкатал на себе.
+> - Pre-releases: активно разрабатываемые версии (всё может меняться и ломаться).
+> 
+> Ближайшие планы: заморозка приложений через Shizuku и встроенный DNS-сервер с фильтрами AdGuard.
+
 ## Возможности
 
 - Протоколы: **VLESS**, **VMess**, **Trojan**, **Shadowsocks**
@@ -74,8 +86,8 @@ VPN-клиент для Android с поддержкой протокола Xray 
 
 Бинарные файлы загружаются автоматически при выполнении `./build.sh binaries`:
 - [teapod-core](https://github.com/Wendor/teapod-core) (xray-core + teapod-tun2socks)
-- [geoip.dat](https://github.com/v2fly/geoip)
-- [geosite.dat](https://github.com/v2fly/domain-list-community)
+- [geoip.dat](https://github.com/Loyalsoldier/v2ray-rules-dat)
+- [geosite.dat](https://github.com/Loyalsoldier/v2ray-rules-dat)
 
 AAR-зависимости подключаются через Gradle:
 - [teapod-tun2socks](https://github.com/Wendor/teapod-tun2socks)

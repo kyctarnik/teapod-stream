@@ -1,8 +1,9 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/app_info.dart';
 import '../../core/services/settings_service.dart';
+import '../../providers/app_icon_provider.dart';
 import '../../providers/apps_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../theme/app_colors.dart';
@@ -16,6 +17,7 @@ class SplitTunnelScreen extends ConsumerStatefulWidget {
 
 class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
   String _search = '';
+  bool _hideSystemApps = true;
 
   void _togglePackage(String pkg, bool isOnlySelected, WidgetRef ref) {
     final settings = ref.read(settingsProvider).maybeWhen(
@@ -113,17 +115,17 @@ class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
                 SegmentedButton<VpnMode>(
                   segments: const [
                     ButtonSegment(
-                      value: VpnMode.allExcept,
-                      label: Text('Все, кроме'),
-                      icon: Icon(Icons.block_rounded, size: 16),
-                    ),
-                    ButtonSegment(
                       value: VpnMode.onlySelected,
                       label: Text('Выбранные'),
                       icon: Icon(Icons.check_circle_rounded, size: 16),
                     ),
+                    ButtonSegment(
+                      value: VpnMode.allExcept,
+                      label: Text('Все, кроме'),
+                      icon: Icon(Icons.block_rounded, size: 16),
+                    ),
                   ],
-                  selected: {settings?.vpnMode ?? VpnMode.allExcept},
+                  selected: {settings?.vpnMode ?? VpnMode.onlySelected},
                   onSelectionChanged: (modes) {
                     if (modes.isNotEmpty) {
                       ref.read(settingsProvider.notifier).save(
@@ -135,8 +137,8 @@ class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
                 const SizedBox(height: 8),
                 Text(
                   isOnlySelected
-                      ? 'Через VPN пойдут только выбранные приложения'
-                      : 'Все приложения идут через VPN, кроме выбранных',
+                      ? 'Только выбранные приложения пойдут через VPN. Остальные — напрямую.'
+                      : 'Весь трафик идёт через VPN, кроме выбранных приложений.',
                   style: const TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 12,
@@ -145,7 +147,7 @@ class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
               ],
             ),
           ),
-          // Search
+          // Search and system apps filter
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
             child: TextField(
@@ -157,7 +159,29 @@ class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
               onChanged: (v) => setState(() => _search = v.toLowerCase()),
             ),
           ),
-          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 4, 16, 0),
+            child: Row(
+              children: [
+                Checkbox(
+                  value: _hideSystemApps,
+                  onChanged: (v) => setState(() => _hideSystemApps = v ?? true),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                GestureDetector(
+                  onTap: () => setState(() => _hideSystemApps = !_hideSystemApps),
+                  child: const Text(
+                    'Скрыть системные приложения',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 4),
           Expanded(
             child: appsAsync.when(
               loading: () => const Center(child: CircularProgressIndicator()),
@@ -173,13 +197,17 @@ class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
                 ),
               ),
               data: (apps) {
-                final filtered = _search.isEmpty
+                var filtered = _search.isEmpty
                     ? apps
                     : apps
                         .where((a) =>
                             a.appName.toLowerCase().contains(_search) ||
                             a.packageName.toLowerCase().contains(_search))
                         .toList();
+
+                if (_hideSystemApps) {
+                  filtered = filtered.where((a) => !a.isSystem).toList();
+                }
 
                 // Отмеченные приложения — в начало списка
                 filtered.sort((a, b) {
@@ -197,6 +225,7 @@ class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
                     final isIncluded = packages.contains(app.packageName);
                     return _AppListTile(
                       app: app.copyWith(isExcluded: isIncluded),
+                      isOnlySelected: isOnlySelected,
                       onToggle: () => _togglePackage(app.packageName, isOnlySelected, ref),
                     );
                   },
@@ -210,14 +239,21 @@ class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
   }
 }
 
-class _AppListTile extends StatelessWidget {
+class _AppListTile extends ConsumerWidget {
   final AppInfo app;
   final VoidCallback onToggle;
+  final bool isOnlySelected;
 
-  const _AppListTile({required this.app, required this.onToggle});
+  const _AppListTile({
+    required this.app,
+    required this.onToggle,
+    required this.isOnlySelected,
+  });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final iconAsync = ref.watch(appIconProvider(app.packageName));
+
     return ListTile(
       title: Text(
         app.appName,
@@ -240,14 +276,19 @@ class _AppListTile extends StatelessWidget {
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: app.iconImage != null
-                  ? Image(
-                      image: app.iconImage!,
-                      width: 40,
-                      height: 40,
-                      errorBuilder: (_, __, ___) => _FallbackIcon(isExcluded: app.isExcluded),
-                    )
-                  : _FallbackIcon(isExcluded: app.isExcluded),
+              child: iconAsync.when(
+                loading: () => _FallbackIcon(isExcluded: app.isExcluded, isOnlySelected: isOnlySelected),
+                error: (_, _) => _FallbackIcon(isExcluded: app.isExcluded, isOnlySelected: isOnlySelected),
+                data: (Uint8List? bytes) => bytes != null
+                    ? Image.memory(
+                        bytes,
+                        width: 40,
+                        height: 40,
+                        errorBuilder: (_, _, _) =>
+                            _FallbackIcon(isExcluded: app.isExcluded, isOnlySelected: isOnlySelected),
+                      )
+                    : _FallbackIcon(isExcluded: app.isExcluded, isOnlySelected: isOnlySelected),
+              ),
             ),
           ),
           if (app.isExcluded)
@@ -257,12 +298,12 @@ class _AppListTile extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.all(2),
                 decoration: BoxDecoration(
-                  color: AppColors.error,
+                  color: isOnlySelected ? AppColors.connected : AppColors.error,
                   shape: BoxShape.circle,
                   border: Border.all(color: AppColors.surface, width: 1.5),
                 ),
-                child: const Icon(
-                  Icons.block_rounded,
+                child: Icon(
+                  isOnlySelected ? Icons.check_rounded : Icons.block_rounded,
                   size: 12,
                   color: Colors.white,
                 ),
@@ -281,19 +322,21 @@ class _AppListTile extends StatelessWidget {
 
 class _FallbackIcon extends StatelessWidget {
   final bool isExcluded;
-  const _FallbackIcon({required this.isExcluded});
+  final bool isOnlySelected;
+  const _FallbackIcon({required this.isExcluded, required this.isOnlySelected});
 
   @override
   Widget build(BuildContext context) {
+    final activeColor = isOnlySelected ? AppColors.connected : AppColors.error;
     return Container(
       decoration: BoxDecoration(
         color: isExcluded
-            ? AppColors.error.withValues(alpha: 0.1)
+            ? activeColor.withValues(alpha: 0.1)
             : AppColors.surfaceHighlight,
       ),
       child: Icon(
         Icons.apps_rounded,
-        color: isExcluded ? AppColors.error : AppColors.textDisabled,
+        color: isExcluded ? activeColor : AppColors.textDisabled,
         size: 20,
       ),
     );

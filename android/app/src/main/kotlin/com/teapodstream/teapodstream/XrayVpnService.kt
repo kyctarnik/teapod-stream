@@ -13,12 +13,17 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.system.OsConstants
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import teapodcore.Teapodcore
 import teapodcore.XrayCallback
 import teapodcore.TunValidator
@@ -45,10 +50,22 @@ class XrayVpnService : VpnService() {
         const val EXTRA_SS_PREFIX = "ss_prefix" // hex-encoded Outline prefix bytes
         const val EXTRA_PROXY_ONLY = "proxy_only" // start only SOCKS proxy, no VPN tunnel
         const val EXTRA_SHOW_NOTIFICATION = "show_notification" // show rich notification with speed
+        const val EXTRA_KILL_SWITCH = "kill_switch" // block traffic when VPN drops unexpectedly
 
         // Static state tracker for querying from Dart
         @Volatile private var currentNativeState: String = "disconnected"
         @JvmStatic fun getNativeState(): String = currentNativeState
+
+        // Set true on explicit user disconnect, false on connect — guards reconnectInternal()
+        val userRequestedDisconnect = AtomicBoolean(false)
+
+        // Active SOCKS credentials — stored so onListen can replay them with "connected"
+        @Volatile var activeSocksPort: Int = 0
+            private set
+        @Volatile var activeSocksUser: String = ""
+            private set
+        @Volatile var activeSocksPassword: String = ""
+            private set
 
         private const val NOTIFICATION_CHANNEL_ID = "vpn_service"
         private const val NOTIFICATION_CHANNEL_MINIMAL_ID = "vpn_service_minimal"
@@ -84,34 +101,62 @@ class XrayVpnService : VpnService() {
 
     private var tunInterface: ParcelFileDescriptor? = null
     private var statsThread: Thread? = null
-    private var isRunning = false
+    private val isRunning = AtomicBoolean(false)
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    private var lastUnderlyingNetwork: Network? = null
+    @Volatile private var lastUnderlyingNetwork: Network? = null
     private var prefixProxy: PrefixTcpProxy? = null
     private var showNotification = true
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var killSwitchEnabled = false
+    private var proxyOnlyMode = false
+    private val networkChangeHandler = Handler(Looper.getMainLooper())
+    private var pendingNetworkRunnable: Runnable? = null
+    private var heartbeatThread: Thread? = null
+    private val heartbeatFailures = AtomicInteger(0)
 
     // TUN parameters — always the same fixed values; defined once here to avoid
     // scattering magic strings across the file. The Dart side uses the same constants
     // (AppConstants.tunAddress / tunNetmask / tunMtu / tunDns).
     private val tunAddress = "10.120.230.1"
     private val tunNetmask = "255.255.255.0"
-    private val tunMtu    = 9000
+    private val tunMtu    = 1500
     private val tunDns    = "1.1.1.1"
 
     override fun onCreate() {
         super.onCreate()
         // Контекст для обновления Quick Settings плитки
         VpnEventStreamHandler.appContext = applicationContext
-        // Register VPN socket protector so xray-core sockets bypass the tunnel (prevents routing loop).
-        // Done once at service creation — protect() is always valid while service is alive.
+        migrateConnectionParamsIfNeeded()
         Teapodcore.registerVpnProtector(object : VpnProtector {
             override fun protect(fd: Long): Boolean = this@XrayVpnService.protect(fd.toInt())
         })
     }
 
+    private fun migrateConnectionParamsIfNeeded() {
+        val oldFile = File(filesDir, "last_connection.json")
+        if (!oldFile.exists()) return
+        try {
+            val json = org.json.JSONObject(oldFile.readText())
+            val meta = org.json.JSONObject().apply {
+                put("socksPort", json.optInt("socksPort", 10808))
+                put("excludedPackages", json.optJSONArray("excludedPackages") ?: org.json.JSONArray())
+                put("includedPackages", json.optJSONArray("includedPackages") ?: org.json.JSONArray())
+                put("vpnMode", json.optString("vpnMode", "allExcept"))
+                val ssPrefix = json.optString("ssPrefix")
+                if (ssPrefix.isNotEmpty()) put("ssPrefix", ssPrefix)
+                put("proxyOnly", json.optBoolean("proxyOnly", false))
+                put("showNotification", json.optBoolean("showNotification", true))
+                put("killSwitch", json.optBoolean("killSwitch", false))
+            }
+            File(filesDir, "last_connection_meta.json").writeText(meta.toString())
+        } catch (_: Exception) { }
+        oldFile.delete()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_DISCONNECT -> {
+                userRequestedDisconnect.set(true)
                 // Signal disconnecting immediately so the button turns yellow
                 // even when triggered from the notification (no Flutter-side handler).
                 currentNativeState = "disconnecting"
@@ -120,7 +165,7 @@ class XrayVpnService : VpnService() {
                 // Run cleanup off the main thread — Go calls (stopTun2Socks/stopXray)
                 // can block if goroutines are stuck after long uptime or network changes.
                 Thread {
-                    val stopThread = Thread { stopVpn() }
+                    val stopThread = Thread { stopVpn(explicit = true) }
                     stopThread.start()
                     try {
                         stopThread.join(5000) // safety timeout — wait max 5s for движок to stop
@@ -151,14 +196,15 @@ class XrayVpnService : VpnService() {
                 val vpnMode = intent.getStringExtra(EXTRA_VPN_MODE) ?: "allExcept"
                 val ssPrefix = intent.getStringExtra(EXTRA_SS_PREFIX)
                 val proxyOnly = intent.getBooleanExtra(EXTRA_PROXY_ONLY, false)
-                // Persist dynamic params so ACTION_CONNECT_QUICK can reconnect without the app
-                saveConnectionParams(socksPort, socksUser, socksPassword,
-                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, showNotification)
+                val killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, false)
+                // Persist non-sensitive params for CONNECT_QUICK reconnect (no credentials)
+                saveConnectionParams(socksPort, excludedPackages, includedPackages,
+                    vpnMode, ssPrefix, proxyOnly, showNotification, killSwitch)
+                userRequestedDisconnect.set(false)
                 ensureForeground()
-                // startVpn blocks (waits up to 3s for xray + establishes TUN) — run off main thread.
                 Thread {
                     startVpn(xrayConfig, socksPort, socksUser, socksPassword,
-                        excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly)
+                        excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, killSwitch)
                 }.start()
                 return START_STICKY
             }
@@ -168,33 +214,34 @@ class XrayVpnService : VpnService() {
                 val configFile = File(filesDir, "xray_config.json")
                 if (params != null && configFile.exists()) {
                     showNotification = params.showNotification
-                    // Check VPN permission only for tunnel mode (proxy-only doesn't need it)
                     val needsPermission = !params.proxyOnly && VpnService.prepare(this) != null
                     if (needsPermission) {
                         openApp()
                     } else {
-                        // Signal connecting immediately so the button turns yellow
-                        // before startVpn() begins its work.
+                        userRequestedDisconnect.set(false)
                         currentNativeState = "connecting"
                         VpnEventStreamHandler.sendStateEvent("connecting")
                         val configText = configFile.readText()
+                        // Extract SOCKS credentials from the saved xray config instead of storing them
+                        val (socksUser, socksPassword) = extractSocksFromConfig(configText)
                         Thread {
                             startVpn(
                                 configText,
-                                params.socksPort, params.socksUser, params.socksPassword,
+                                params.socksPort, socksUser, socksPassword,
                                 params.excludedPackages, params.includedPackages, params.vpnMode,
-                                params.ssPrefix, params.proxyOnly
+                                params.ssPrefix, params.proxyOnly, params.killSwitch
                             )
                         }.start()
                     }
                 } else {
-                    // No saved params yet — open app so the user can connect normally
                     openApp()
                 }
                 return START_STICKY
             }
         }
-        // Service restarted by Android after being killed — show disconnected notification
+        // Service restarted by Android after being killed — must call startForeground() first
+        // (Android 8+ requires startForeground within 5s of startForegroundService)
+        ensureForeground()
         showDisconnectedNotification()
         return START_STICKY
     }
@@ -203,34 +250,33 @@ class XrayVpnService : VpnService() {
 
     private data class ConnectionParams(
         val socksPort: Int,
-        val socksUser: String,
-        val socksPassword: String,
         val excludedPackages: List<String>,
         val includedPackages: List<String>,
         val vpnMode: String,
         val ssPrefix: String?,
         val proxyOnly: Boolean,
         val showNotification: Boolean,
+        val killSwitch: Boolean,
     )
 
     private fun saveConnectionParams(
-        socksPort: Int, socksUser: String, socksPassword: String,
+        socksPort: Int,
         excludedPackages: List<String>, includedPackages: List<String>,
         vpnMode: String, ssPrefix: String?, proxyOnly: Boolean, showNotification: Boolean,
+        killSwitch: Boolean,
     ) {
         try {
             val json = org.json.JSONObject().apply {
                 put("socksPort", socksPort)
-                put("socksUser", socksUser)
-                put("socksPassword", socksPassword)
                 put("excludedPackages", org.json.JSONArray(excludedPackages))
                 put("includedPackages", org.json.JSONArray(includedPackages))
                 put("vpnMode", vpnMode)
                 if (ssPrefix != null) put("ssPrefix", ssPrefix)
                 put("proxyOnly", proxyOnly)
                 put("showNotification", showNotification)
+                put("killSwitch", killSwitch)
             }
-            File(filesDir, "last_connection.json").writeText(json.toString())
+            File(filesDir, "last_connection_meta.json").writeText(json.toString())
         } catch (e: Exception) {
             log("warning", "Failed to save connection params: ${e.message}")
         }
@@ -238,7 +284,7 @@ class XrayVpnService : VpnService() {
 
     private fun loadConnectionParams(): ConnectionParams? {
         return try {
-            val text = File(filesDir, "last_connection.json").readText()
+            val text = File(filesDir, "last_connection_meta.json").readText()
             val json = org.json.JSONObject(text)
             val excluded = json.getJSONArray("excludedPackages")
                 .let { arr -> List(arr.length()) { arr.getString(it) } }
@@ -246,17 +292,36 @@ class XrayVpnService : VpnService() {
                 .let { arr -> List(arr.length()) { arr.getString(it) } }
             ConnectionParams(
                 socksPort = json.getInt("socksPort"),
-                socksUser = json.getString("socksUser"),
-                socksPassword = json.getString("socksPassword"),
                 excludedPackages = excluded,
                 includedPackages = included,
                 vpnMode = json.optString("vpnMode", "allExcept"),
                 ssPrefix = json.optString("ssPrefix").takeIf { it.isNotEmpty() },
                 proxyOnly = json.optBoolean("proxyOnly", false),
                 showNotification = json.optBoolean("showNotification", true),
+                killSwitch = json.optBoolean("killSwitch", false),
             )
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun extractSocksFromConfig(configJson: String): Pair<String, String> {
+        return try {
+            val inbounds = org.json.JSONObject(configJson).getJSONArray("inbounds")
+            for (i in 0 until inbounds.length()) {
+                val inbound = inbounds.getJSONObject(i)
+                if (inbound.optString("tag") == "socks-in") {
+                    val accounts = inbound.optJSONObject("settings")
+                        ?.optJSONArray("accounts") ?: continue
+                    if (accounts.length() > 0) {
+                        val acc = accounts.getJSONObject(0)
+                        return acc.optString("user", "") to acc.optString("pass", "")
+                    }
+                }
+            }
+            "" to ""
+        } catch (_: Exception) {
+            "" to ""
         }
     }
 
@@ -276,9 +341,14 @@ class XrayVpnService : VpnService() {
         vpnMode: String,
         ssPrefix: String? = null,
         proxyOnly: Boolean = false,
+        killSwitch: Boolean = false,
     ) {
-        if (isRunning) return
-        isRunning = true
+        if (!isRunning.compareAndSet(false, true)) return
+        // Close any TUN left open by a previous kill-switch blocking state
+        try { tunInterface?.close() } catch (_: Exception) {}
+        tunInterface = null
+        killSwitchEnabled = killSwitch
+        proxyOnlyMode = proxyOnly
         currentNativeState = "connecting"
         VpnEventStreamHandler.sendStateEvent("connecting")
         log("info", "Starting VPN")
@@ -306,8 +376,13 @@ class XrayVpnService : VpnService() {
 
                 log("info", "xray started (proxy-only, SOCKS on port $socksPort)")
                 startStatsMonitoring()
+                acquireWakeLock()
                 currentNativeState = "connected"
-                VpnEventStreamHandler.sendStateEvent("connected")
+                activeSocksPort = socksPort
+                activeSocksUser = socksUser
+                activeSocksPassword = socksPassword
+                VpnEventStreamHandler.sendConnectedEvent(socksPort, socksUser, socksPassword)
+                startHeartbeat()
                 log("info", "Proxy-only mode active")
             } else {
                 // Full VPN tunnel mode
@@ -374,6 +449,7 @@ class XrayVpnService : VpnService() {
 
                 val tunErr = Teapodcore.startTun2Socks(
                     tunInterface!!.fd.toLong(),
+                    tunMtu.toLong(),
                     socksPort.toLong(),
                     socksUser,
                     socksPassword,
@@ -385,8 +461,13 @@ class XrayVpnService : VpnService() {
 
                 startStatsMonitoring()
                 registerNetworkCallback()
+                acquireWakeLock()
                 currentNativeState = "connected"
-                VpnEventStreamHandler.sendStateEvent("connected")
+                activeSocksPort = socksPort
+                activeSocksUser = socksUser
+                activeSocksPassword = socksPassword
+                VpnEventStreamHandler.sendConnectedEvent(socksPort, socksUser, socksPassword)
+                startHeartbeat()
                 log("info", "VPN connected successfully")
             }
         } catch (e: Exception) {
@@ -529,10 +610,30 @@ class XrayVpnService : VpnService() {
         stopSelf()
     }
 
-    private fun stopVpn(resultState: String = "disconnected") {
-        if (!isRunning) return  // idempotent — safe to call multiple times
-        isRunning = false
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock?.release()
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TeapodStream:VpnWakeLock")
+            wakeLock?.acquire()
+        } catch (e: Exception) {
+            log("warning", "Failed to acquire wake lock: ${e.message}")
+        }
+    }
+
+    private fun stopVpn(
+        resultState: String = "disconnected",
+        explicit: Boolean = false,
+        reconnecting: Boolean = false,
+    ) {
+        if (!isRunning.compareAndSet(true, false)) return  // idempotent — safe to call multiple times
+        stopHeartbeat()
         lastUnderlyingNetwork = null
+        pendingNetworkRunnable?.let { networkChangeHandler.removeCallbacks(it) }
+        pendingNetworkRunnable = null
+
+        try { wakeLock?.release() } catch (_: Exception) {}
+        wakeLock = null
 
         try {
             try { unregisterNetworkCallback() } catch (e: Exception) {
@@ -559,16 +660,35 @@ class XrayVpnService : VpnService() {
                 log("warning", "stopXray failed: ${e.message}")
             }
 
-            try {
-                tunInterface?.close()
-            } catch (e: Exception) {
-                log("warning", "tunInterface.close failed: ${e.message}")
+            // Kill switch: on unexpected drop (non-explicit, non-reconnect), keep TUN open so
+            // all traffic is routed to the TUN but nobody reads it → effectively blocked.
+            // setUnderlyingNetworks(emptyArray) signals Android there is no real network.
+            val activateKillSwitch = killSwitchEnabled && !explicit && !reconnecting && !proxyOnlyMode
+                    && tunInterface != null
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+            if (activateKillSwitch) {
+                setUnderlyingNetworks(emptyArray())
+                log("info", "Kill switch active: TUN kept open, underlying networks cleared")
+            } else {
+                try {
+                    tunInterface?.close()
+                } catch (e: Exception) {
+                    log("warning", "tunInterface.close failed: ${e.message}")
+                }
+                tunInterface = null
             }
-            tunInterface = null
+
+            // On explicit disconnect, remove the config file so credentials
+            // don't persist on disk between user sessions.
+            if (explicit && !reconnecting) {
+                try { File(filesDir, "xray_config.json").delete() } catch (_: Exception) {}
+            }
         } finally {
-            // Always send final state — even if cleanup partially failed
-            currentNativeState = resultState
-            VpnEventStreamHandler.sendStateEvent(resultState)
+            // Don't overwrite "connecting" state when doing internal reconnect
+            if (!reconnecting) {
+                currentNativeState = resultState
+                VpnEventStreamHandler.sendStateEvent(resultState)
+            }
         }
     }
 
@@ -588,7 +708,7 @@ class XrayVpnService : VpnService() {
         lastDownloadSpeed = 0
 
         statsThread = Thread {
-            while (isRunning) {
+            while (isRunning.get()) {
                 try {
                     Thread.sleep(1000)
                     val now = System.currentTimeMillis()
@@ -617,18 +737,34 @@ class XrayVpnService : VpnService() {
     private fun registerNetworkCallback() {
         try {
             val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            // Pre-seed lastUnderlyingNetwork before registering so the initial onAvailable
+            // callback sees prev == current and does NOT trigger a spurious reconnect.
+            updateUnderlyingNetworks(cm)
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     log("info", "Network available: $network")
+                    val prev = lastUnderlyingNetwork
                     updateUnderlyingNetworks(cm)
+                    val current = lastUnderlyingNetwork
+                    // Trigger if network changed (prev→current) OR if prev was null but we now
+                    // have a network (covers WiFi→LTE when onLost fired before onAvailable).
+                    if (current != null && prev != current) {
+                        scheduleNetworkChanged()
+                    }
                 }
 
                 override fun onLost(network: Network) {
                     log("info", "Network lost: $network")
+                    // Snapshot BEFORE clearing — needed for smooth-handover case where
+                    // onAvailable(LTE) fires before onLost(WiFi): prev=wifi, after=LTE → trigger.
+                    val prev = lastUnderlyingNetwork
                     if (lastUnderlyingNetwork == network) {
                         lastUnderlyingNetwork = null
                     }
                     updateUnderlyingNetworks(cm)
+                    if (prev != null && lastUnderlyingNetwork != null && prev != lastUnderlyingNetwork) {
+                        scheduleNetworkChanged()
+                    }
                 }
 
                 override fun onCapabilitiesChanged(
@@ -696,6 +832,69 @@ class XrayVpnService : VpnService() {
                 log("info", "Underlying network updated: $activeNetwork")
             }
         }
+    }
+
+    private fun scheduleNetworkChanged() {
+        // Only reconnect when fully connected — prevents spurious reconnects during the
+        // initial startVpn() phase when onAvailable fires right after registration.
+        if (currentNativeState != "connected") return
+        pendingNetworkRunnable?.let { networkChangeHandler.removeCallbacks(it) }
+        val r = Runnable { reconnectInternal() }
+        pendingNetworkRunnable = r
+        networkChangeHandler.postDelayed(r, 2000L)
+    }
+
+    private fun reconnectInternal() {
+        if (userRequestedDisconnect.get()) return
+        if (!isRunning.get()) return
+        networkChangeHandler.post {
+            if (userRequestedDisconnect.get() || !isRunning.get()) return@post
+            currentNativeState = "connecting"
+            VpnEventStreamHandler.sendStateEvent("connecting")
+            Thread {
+                stopVpn(resultState = "connecting", reconnecting = true)
+                val intent = Intent(this@XrayVpnService, XrayVpnService::class.java)
+                    .setAction(ACTION_CONNECT_QUICK)
+                startService(intent)
+            }.start()
+        }
+    }
+
+    private fun startHeartbeat() {
+        heartbeatThread?.interrupt()
+        heartbeatFailures.set(0)
+        heartbeatThread = Thread {
+            while (!Thread.currentThread().isInterrupted && isRunning.get()) {
+                try {
+                    Thread.sleep(30_000)
+                    if (!isRunning.get()) break
+                    val port = activeSocksPort
+                    if (port <= 0) continue
+                    Socket().use { s ->
+                        s.soTimeout = 5000
+                        s.connect(InetSocketAddress("127.0.0.1", port), 5000)
+                    }
+                    heartbeatFailures.set(0)
+                    log("debug", "Heartbeat OK")
+                } catch (_: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    val failures = heartbeatFailures.incrementAndGet()
+                    log("warning", "Heartbeat failed ($failures): ${e.message}")
+                    if (failures >= 3) {
+                        log("warning", "Heartbeat failed $failures times, reconnecting")
+                        reconnectInternal()
+                        break
+                    }
+                }
+            }
+        }.also { it.isDaemon = true; it.start() }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatThread?.interrupt()
+        heartbeatThread = null
+        heartbeatFailures.set(0)
     }
 
     private fun unregisterNetworkCallback() {

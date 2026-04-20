@@ -27,6 +27,7 @@ class XrayEngine implements VpnEngine {
       'vpnMode': options.vpnMode.name,
       'proxyOnly': options.proxyOnly,
       'showNotification': options.showNotification,
+      'killSwitch': options.killSwitch,
       if (config.ssPrefix != null) 'ssPrefix': config.ssPrefix,
     });
   }
